@@ -36,7 +36,7 @@ const BANNER = /^bz [0-9][^\r\n]*Bandisoft[^\r\n]*\r?\n?/gim;
 /** bz 的清单结尾行，例如 "180 files, 4 folders"。 */
 const COUNT_LINE = /(\d+)\s+files?,\s*(\d+)\s+folders?/i;
 /** 默认解压目录要剥掉的压缩包扩展名；tar 必须在列表里，否则目标会等于压缩包本身。 */
-const ARCHIVE_EXTENSION = /\.(tar\.gz|tgz|tbz2?|tar|zipx?|7z|lzh|lha|iso|gz|xz|rar|exe)$/i;
+const ARCHIVE_EXTENSION = /\.(tar\.gz|tar\.bz2|tgz|tbz2?|tar|zipx?|7z|lzh|lha|iso|gz|xz|rar|exe)$/i;
 
 const FORMATS = ['zip', 'zipx', 'exe', 'tar', 'tgz', 'lzh', 'iso', '7z', 'gz', 'xz'];
 
@@ -562,17 +562,22 @@ export function apply(ctx, config) {
       if (action === 'create') {
         const sources = Array.isArray(args.files) ? args.files.filter((item) => typeof item === 'string') : [];
         if (sources.length === 0) throw new Error('create requires files: at least one file or folder to compress.');
-        const existedBefore = existsSync(archivePath);
+        // bz appends the format extension to a name without one (`x` → `x.zip`), so the
+        // overwrite guard and every later check must watch the name that lands on disk.
+        const format = detectFormat(archivePath, typeof args.format === 'string' ? args.format : undefined);
+        const artifactPath = ARCHIVE_EXTENSION.test(path.basename(archivePath))
+          ? archivePath
+          : `${archivePath}.${format}`;
+        const existedBefore = existsSync(artifactPath);
         // bz 的 `c` 会静默替换同名压缩包（help: "Create a new archive (or overwrite an existing file)"），
         // 默认拒绝覆盖，避免悄悄毁掉旧包。
         if (existedBefore && args.overwrite !== 'overwrite') {
           throw new Error(
-            `Archive already exists: ${archivePath}. Pass overwrite:"overwrite" to replace it, `
+            `Archive already exists: ${artifactPath}. Pass overwrite:"overwrite" to replace it, `
               + 'or choose another archive name.',
           );
         }
-        const beforeMtime = existedBefore ? modifiedAt(archivePath) : undefined;
-        const format = detectFormat(archivePath, typeof args.format === 'string' ? args.format : undefined);
+        const beforeMtime = existedBefore ? modifiedAt(artifactPath) : undefined;
         const level = parseLevel(args.level);
         const argv = ['c', `-fmt:${format}`, `-l:${level}`, '-y'];
         // `-r-` alone does NOT stop a directory that is named explicitly from being
@@ -583,27 +588,52 @@ export function apply(ctx, config) {
         argv.push(shallow ? '-r-' : '-r');
         if (password) argv.push(passwordArg(password));
         argv.push(archivePath);
+        const skipped = [];
         for (const source of sources) {
           const absolute = path.resolve(cwd, source);
           if (!existsSync(absolute)) throw new Error(`Source not found: ${absolute}`);
-          assertNotArchive(absolute, archivePath);
+          assertNotArchive(absolute, artifactPath);
+          let info;
+          try {
+            info = statSync(absolute);
+          } catch (error) {
+            throw new Error(`Source not readable: ${absolute} (${error instanceof Error ? error.message : String(error)})`);
+          }
           // Keep working-directory-relative paths unchanged so the archive mirrors the tree,
           // and feed absolute paths for anything outside it.
           const relative = path.relative(cwd, absolute);
           let entry = relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : absolute;
-          if (shallow && statSync(absolute).isDirectory()) entry = path.win32.join(entry, '*');
+          if (shallow && info.isDirectory()) {
+            // `<dir>\\*` means one level, but an empty directory has nothing to expand and
+            // bz answers "No files to archive" (exit 2). Record it instead of failing the run.
+            let empty = false;
+            try {
+              empty = readdirSync(absolute).length === 0;
+            } catch {
+              empty = false;
+            }
+            if (empty) {
+              skipped.push(entry);
+              continue;
+            }
+            entry = path.win32.join(entry, '*');
+          }
           // A name starting with "-" would be read as a switch (e.g. "-r"), and bz
           // answers with "No files to archive". A "./" prefix keeps it a path.
           argv.push(entry.startsWith('-') ? `./${entry}` : entry);
         }
+        if (sources.length > 0 && skipped.length === sources.length) {
+          throw new Error(
+            'No files to archive: every source was an empty directory ('
+            + skipped.join(', ') + '). Pass another source or recursive:true.',
+          );
+        }
         const result = await run(argv);
         const decoded = cleanOutput(decode(result.output));
-        const produced = existsSync(archivePath);
-        // bz 会自己给没有扩展名的归档名补上格式后缀（archive:"x" → x.zip），把落盘的真实名字找出来。
-        const artifact = produced
-          ? archivePath
-          : [`${archivePath}.${format}`].find((candidate) => existsSync(candidate));
-        const fresh = produced && (!existedBefore || modifiedAt(archivePath) !== beforeMtime);
+        const produced = existsSync(artifactPath);
+        // An unreadable mtime cannot prove staleness; `produced` already proves the file exists.
+        const fresh = produced
+          && (!existedBefore || beforeMtime === undefined || modifiedAt(artifactPath) !== beforeMtime);
         // bz 用退出码 1 表示"有 warning 但已完成"；只有确实写出了新文件才认这个成功，
         // 退出码 2（例如 No files to archive）永远算失败。
         const ok = result.exitCode === 0 ? produced : result.exitCode === 1 && fresh;
@@ -611,20 +641,21 @@ export function apply(ctx, config) {
         let size;
         if (ok) {
           try {
-            size = statSync(archivePath).size;
+            size = statSync(artifactPath).size;
           } catch {
             size = undefined;
           }
         }
+        const skippedNote = skipped.length === 0
+          ? ''
+          : `; skipped empty director${skipped.length === 1 ? 'y' : 'ies'} ${skipped.join(', ')}`;
         let summary;
         if (ok) {
-          summary = `Created ${path.basename(archivePath)} (${format}${size === undefined ? '' : `, ${size} bytes`})`
-            + (warnings.length === 0 ? '' : ` with ${warnings.length} warning(s)`);
+          summary = `Created ${path.basename(artifactPath)} (${format}${size === undefined ? '' : `, ${size} bytes`})`
+            + (warnings.length === 0 ? '' : ` with ${warnings.length} warning(s)`)
+            + skippedNote;
         } else if (result.exitCode === 0) {
-          // exit 0 却说没产物：最常见的原因就是上面那条自动补后缀，明说比让人对着 "code 0" 猜好。
-          summary = artifact
-            ? `bz.exe exited with code 0 but wrote ${path.basename(artifact)} (bz appends the format extension); pass that name as archive.`
-            : `bz.exe exited with code 0 but did not create ${path.basename(archivePath)}.`;
+          summary = `bz.exe exited with code 0 but did not create ${path.basename(artifactPath)}.`;
         } else {
           summary = `bz.exe exited with code ${result.exitCode}`;
         }
@@ -652,6 +683,18 @@ export function apply(ctx, config) {
             path.dirname(archivePath),
             stem === baseName || stem === '' ? `${baseName} extracted` : stem,
           );
+      if (destinationPath === archivePath) {
+        throw new Error(`destination must not be the archive itself: ${archivePath}`);
+      }
+      if (existsSync(destinationPath)) {
+        let isDirectory = false;
+        try {
+          isDirectory = statSync(destinationPath).isDirectory();
+        } catch {
+          isDirectory = false;
+        }
+        if (!isDirectory) throw new Error(`destination already exists as a file: ${destinationPath}`);
+      }
       const overwriteSwitch = OVERWRITE_SWITCH[args.overwrite] ?? OVERWRITE_SWITCH.overwrite;
       const argv = [args.flat === true ? 'e' : 'x', `-o:${destinationPath}`, overwriteSwitch, '-y'];
       if (password) argv.push(passwordArg(password));
