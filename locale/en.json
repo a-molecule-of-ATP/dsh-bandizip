@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Bandizip archives",
+    "description": "Pack, unpack, inspect, and verify archives on this PC through the installed Bandizip console tool (bz.exe). Ask the agent to compress files or a folder, extract a .zip or .7z, list what an archive holds, or test whether it is intact or password-protected. Writing supports zip, zipx, 7z, tar, tgz, gz, xz, iso, lzh, and self-extracting exe; extracting and listing also read rar and the other formats Bandizip knows. Relative paths resolve against the session working directory, extraction defaults to a folder beside the archive, and nothing opens a window or waits for a prompt: a missing password fails immediately. Packing never replaces an existing archive unless you explicitly allow it. Passwords are passed to bz.exe as command-line switches, so other processes on this PC can see them. The plugin looks for bz.exe at the configured bzPath and in the standard Bandizip install folders (a bare file name is resolved through PATH); turning the plugin off removes the tool.",
+    "detail": "docs/DETAIL.md"
+  }
+}

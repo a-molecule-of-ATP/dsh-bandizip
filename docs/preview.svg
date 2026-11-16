@@ -1,0 +1,43 @@
+<svg width="640" height="300" viewBox="0 0 640 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g>
+    <rect x="80" y="96" width="202" height="122" rx="16" fill="#DCE8FA" />
+    <rect x="72" y="88" width="202" height="122" rx="16" fill="#EBF3FE" />
+    <rect x="64" y="80" width="202" height="122" rx="16" fill="#F7FAFF" stroke="#CFDFF5" stroke-width="2.5" />
+    <g>
+      <rect x="88" y="102" width="22" height="22" rx="7" fill="#C9DCF4" />
+      <rect x="122" y="107" width="110" height="11" rx="5.5" fill="#D5E3F6" />
+      <rect x="88" y="140" width="22" height="22" rx="7" fill="#C9DCF4" />
+      <rect x="122" y="145" width="130" height="11" rx="5.5" fill="#D5E3F6" />
+      <rect x="88" y="178" width="22" height="22" rx="7" fill="#C9DCF4" />
+      <rect x="122" y="183" width="88" height="11" rx="5.5" fill="#D5E3F6" />
+    </g>
+  </g>
+
+  <g stroke="#96A9CB" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M312 150h40" />
+    <path d="M338 134l18 16-18 16" />
+  </g>
+
+  <g>
+    <rect x="390" y="98" width="150" height="140" rx="24" fill="#0A4E9E" />
+    <rect x="382" y="90" width="150" height="140" rx="24" fill="url(#bz-preview-body)" />
+    <path d="M457 104v114" stroke="#16235C" stroke-opacity="0.24" stroke-width="10" stroke-linecap="round" />
+    <g fill="#FFFFFF">
+      <rect x="440" y="108" width="17" height="8.5" rx="1.4" />
+      <rect x="451" y="120" width="17" height="8.5" rx="1.4" />
+      <rect x="440" y="132" width="17" height="8.5" rx="1.4" />
+      <rect x="451" y="144" width="17" height="8.5" rx="1.4" />
+      <rect x="440" y="156" width="17" height="8.5" rx="1.4" />
+      <rect x="451" y="168" width="17" height="8.5" rx="1.4" />
+      <rect x="440" y="180" width="17" height="8.5" rx="1.4" />
+    </g>
+    <rect x="447" y="192" width="20" height="10" rx="5" fill="#FFFFFF" fill-opacity="0.9" />
+  </g>
+
+  <defs>
+    <linearGradient id="bz-preview-body" x1="394" y1="90" x2="520" y2="230" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3BA8F5" />
+      <stop offset="1" stop-color="#0B6FCB" />
+    </linearGradient>
+  </defs>
+</svg>
