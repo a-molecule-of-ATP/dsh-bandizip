@@ -884,7 +884,7 @@ export function apply(ctx, config) {
           type: 'string',
           enum: ENCODINGS,
           description:
-            'list and extract only: output encoding. auto (default) tries UTF-8 then falls back to GBK; '
+            'Output encoding for every action that decodes bz.exe output. auto (default) tries UTF-8 then falls back to GBK; '
             + 'utf-8 and gbk force a specific decoder.',
         },
         timeoutSeconds: {
@@ -1021,14 +1021,34 @@ export function apply(ctx, config) {
       // ---------------------------------------------------------------- list / test
       if (action === 'list' || action === 'test') {
         if (!existsSync(archivePath)) throw new Error(`Archive not found: ${archivePath}`);
+        if (action === 'test') {
+          // `t` is the only bz command that verifies entry data; `l` reads the
+          // central directory alone and reports a damaged archive as fine, so the
+          // two actions must not share an implementation.
+          const testArgv = ['t', '-y'];
+          if (password) testArgv.push(passwordArg(password, settings.allowPassword));
+          testArgv.push(archivePath);
+          const tested = await run(testArgv);
+          const testedOut = cleanOutput(decode(tested.output), maxOutputChars);
+          const testOk = tested.exitCode === 0;
+          return {
+            action,
+            archive: archivePath,
+            ok: testOk,
+            exitCode: tested.exitCode,
+            summary: testOk
+              ? `Archive ${path.basename(archivePath)} passed the integrity test`
+              : `Integrity test FAILED for ${path.basename(archivePath)} (bz.exe exited with code ${tested.exitCode})`,
+            output: testedOut.text,
+            truncated: testedOut.truncated,
+          };
+        }
         const listing = await listArchive(run, archivePath, password, settings.allowPassword, encoding);
         const decoded = truncateOutput(listing.text, maxOutputChars);
         const ok = listing.ok;
         let summary = ok
-          ? action === 'list'
-            ? `Listed ${path.basename(archivePath)}`
-              + (listing.counts ? ` (${listing.counts.files} files, ${listing.counts.folders} folders)` : '')
-            : `Archive ${path.basename(archivePath)} passed the integrity test`
+          ? `Listed ${path.basename(archivePath)}`
+            + (listing.counts ? ` (${listing.counts.files} files, ${listing.counts.folders} folders)` : '')
           : `bz.exe exited with code ${listing.exitCode}`;
         const result = {
           action,
@@ -1058,7 +1078,9 @@ export function apply(ctx, config) {
           result.offset = offset;
           if (limit !== undefined) {
             result.limit = limit;
-            result.nextOffset = offset + page.length < total ? offset + page.length : null;
+            // `nextOffset` is declared as an integer, so the last page omits it
+            // rather than sending `null` — which the output validator would reject.
+            if (offset + page.length < total) result.nextOffset = offset + page.length;
           }
           if (page.length !== sourceEntries.length || limit !== undefined) {
             result.summary += `; page ${offset + 1}-${offset + page.length} of ${total} entries`;
@@ -1550,9 +1572,6 @@ export function apply(ctx, config) {
       }
       const decoded = cleanOutput(usedOutput, maxOutputChars);
       const ok = result.exitCode === 0;
-      // 统计口径是"压缩包里有多少条"：直接数目标目录会把解压前就存在的文件算进来。
-      const counted = (await listEntryCount(run, archivePath, password, settings.allowPassword, encoding))
-        ?? (existsSync(destinationPath) ? countFiles(destinationPath) : { files: 0, folders: 0 });
       // Item 12: structured manifest of what actually landed (max 500 entries).
       // When include/exclude masks are in play, selectedFiles - not the whole listing -
       // is the truth of what was extracted.

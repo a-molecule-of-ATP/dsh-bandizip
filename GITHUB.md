@@ -5,7 +5,7 @@
 ## 建议的远端仓库
 
 - 仓库名：`dsh-bandizip`
-- 描述：`DeepSeek Harness plugin that drives the local Bandizip console tool (bz.exe) to create, extract, list, and test archives.`
+- 描述：`DeepSeek Harness plugin that drives the local Bandizip console tool (bz.exe) to create, extract, list, test, preview, diff, browse and convert archives.`
 - License：MIT
 - 建议 topic：`deepseek-harness`、`dsh-plugin`、`bandizip`、`archive`
 

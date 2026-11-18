@@ -33,7 +33,8 @@ say what it wants.
 
 An `include` / `exclude` mask is a path relative to the archive root, and `*`
 covers exactly one level. All three cases below report success — including the
-one that matches nothing:
+one that matches nothing. **The plugin only reads bz's exit code and does not
+detect an empty match for you, so check the returned entry count yourself:**
 
 ![What each mask matches](masks.svg)
 
