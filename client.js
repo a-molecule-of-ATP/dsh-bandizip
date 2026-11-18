@@ -71,38 +71,6 @@ window.__ModuleLoader__.load({
       ]);
     }
 
-    function ChoiceRow(props) {
-      const active = props.active;
-      return h('label', {
-        style: {
-          display: 'flex', alignItems: 'flex-start', gap: 12, padding: '13px 16px',
-          borderTop: props.first ? 'none' : `1px solid ${C.border}`,
-          cursor: 'pointer',
-          background: active ? 'color-mix(in srgb, ' + C.brand + ' 10%, transparent)' : 'transparent',
-          transition: `background-color 140ms ${EASE_OUT}`,
-        },
-      }, [
-        h('span', {
-          key: 'dot', 'aria-hidden': true,
-          style: {
-            flexShrink: 0, marginTop: 2, width: 16, height: 16, borderRadius: '50%',
-            border: `1.5px solid ${active ? C.brand : C.border}`,
-            display: 'grid', placeItems: 'center',
-          },
-        }, active ? h('span', {
-          key: 'i', style: { width: 8, height: 8, borderRadius: '50%', background: C.brand },
-        }) : null),
-        h('input', {
-          key: 'r', type: 'radio', name: props.name, checked: active,
-          onChange: props.onSelect, style: { position: 'absolute', opacity: 0, width: 0, height: 0 },
-        }),
-        h('div', { key: 'copy', style: { minWidth: 0 } }, [
-          h('p', { key: 't', style: ROW_TITLE }, props.label),
-          h('p', { key: 'd', style: ROW_DESC }, props.hint),
-        ]),
-      ]);
-    }
-
     const num = (value, fallback) => (Number.isFinite(value) ? value : fallback);
 
     function Page(props) {
@@ -242,25 +210,6 @@ window.__ModuleLoader__.load({
         h(Switch, { key: 's', value, onChange }),
       ]);
 
-      /** One label + hint + radio group, for a small enum setting. */
-      const choiceField = (key, label, hint, options, current, onSelect, first) => h('div', {
-        key,
-        style: { ...ROW, ...(first ? {} : { borderTop: `1px solid ${C.border}` }) },
-      }, [
-        h('p', { key: 'l', style: { ...ROW_TITLE, marginBottom: 8 } }, label),
-        h('div', { key: 'opts', style: { border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' } },
-          options.map(([value, optionLabel, optionHint], index) => h(ChoiceRow, {
-            key: value,
-            first: index === 0,
-            name: `bandizip-${key}`,
-            label: optionLabel,
-            hint: optionHint,
-            active: current === value,
-            onSelect: () => onSelect(value),
-          }))),
-        hint ? h('p', { key: 'h', style: { ...ROW_DESC, marginTop: 8 } }, hint) : null,
-      ]);
-
       return h('div', { style: { fontSize: 13, color: C.text, maxWidth: 760 } }, [
         // 总开关前置：先决定要不要用这个工具，再谈细节。
         h('section', { key: 'master', style: CARD }, [
@@ -294,66 +243,15 @@ window.__ModuleLoader__.load({
           ]),
         ]),
 
-        h('section', { key: 'extract', style: CARD }, [
-          h('p', { key: 't', style: CARD_TITLE }, '解压默认值'),
-          h('p', { key: 'd', style: CARD_DESC }, '调用时未显式指定这些参数，就按这里的取值执行。'),
-          h('div', { key: 'box', style: ROWS }, [
-            choiceField('overwrite', '同名文件处理',
-              '解压时目标目录已有同名文件怎么办。覆盖最省事但会丢掉原有内容。',
-              [
-                ['overwrite', '覆盖', '已存在的文件直接替换。'],
-                ['skip', '跳过', '保留已有文件，只解出新文件。'],
-                ['rename', '保留两者', '重名文件自动加序号。'],
-              ],
-              draft.defaultOverwrite ?? 'overwrite',
-              (value) => update({ defaultOverwrite: value }), true),
-            switchField('flat', '默认丢弃目录结构',
-              '解压时只保留文件、不重建子目录。适合扁平压缩包；嵌套目录的包打开后文件会挤在一起。',
-              draft.defaultFlat === true,
-              (value) => update({ defaultFlat: value })),
-            choiceField('destination', '默认解压位置',
-              '未指定 destination 时解到哪里。cwd 会让不同压缩包解出的同名文件互相覆盖。',
-              [
-                ['beside', '压缩包旁边', '解到压缩包旁的同名文件夹，原包位置不变。'],
-                ['cwd', '会话工作目录', '解到当前会话的工作目录，便于后续直接引用。'],
-              ],
-              draft.defaultDestination ?? 'beside',
-              (value) => update({ defaultDestination: value })),
-            switchField('verify', '打包后自动校验',
-              '创建成功后自动再跑一次完整性校验。更可靠，但每个压缩包多花一次往返时间。',
-              draft.verifyAfterCreate === true,
-              (value) => update({ verifyAfterCreate: value })),
-          ]),
-        ]),
-
         h('section', { key: 'pack', style: CARD }, [
-          h('p', { key: 't', style: CARD_TITLE }, '打包默认值'),
-          h('p', { key: 'd', style: CARD_DESC }, 'create 未显式指定这些参数时的取值。'),
+          h('p', { key: 't', style: CARD_TITLE }, '打包'),
+          h('p', { key: 'd', style: CARD_DESC },
+            '压缩级别、是否递归、归档格式都在调用时按次决定，这里只留一道防止覆盖旧包的闸门。'),
           h('div', { key: 'box', style: ROWS }, [
-            textField('压缩级别', '0 只打包不压缩、速度最快；9 体积最小但明显更慢。默认按这里的取值。', num(draft.defaultLevel, 5),
-              (value) => updateNumber('defaultLevel', value),
-              { first: true, input: { type: 'number', min: 0, max: 9, step: 1 } }),
             switchField('archiveOverwrite', '允许覆盖同名压缩包',
               '关闭时，即使调用方显式传 overwrite:"overwrite" 也会拒绝覆盖已有压缩包——这是防止误删旧包的总开关。',
               draft.allowArchiveOverwrite === true,
-              (value) => update({ allowArchiveOverwrite: value })),
-            switchField('recursive', '默认递归子目录',
-              '关闭后只打包每层文件，目录结构不再深入，嵌套内容会被漏掉。',
-              draft.defaultRecursive !== false,
-              (value) => update({ defaultRecursive: value })),
-            choiceField('fallback', '无法识别扩展名时的格式',
-              '压缩包名没有可识别扩展名时用哪种格式。auto 表示直接报错，让调用方显式指定格式。',
-              [
-                ['auto', '自动（报错）', '不猜格式，直接要求调用方传 format。'],
-                ['zip', 'zip', '兼容性最好，体积一般。'],
-                ['7z', '7z', '压缩率更高，需要对方能解 7z。'],
-                ['tar', 'tar', '不压缩的归档，适合打包目录结构。'],
-                ['tgz', 'tgz', 'tar.gz，Linux 下常见。'],
-                ['gz', 'gz', '只压缩单个文件，不含目录结构。'],
-                ['xz', 'xz', '压缩率高但较慢。'],
-              ],
-              draft.fallbackFormat ?? 'auto',
-              (value) => update({ fallbackFormat: value })),
+              (value) => update({ allowArchiveOverwrite: value }), true),
           ]),
         ]),
 

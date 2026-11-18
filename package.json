@@ -3,7 +3,26 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Compress, extract, inspect, and verify archives with the local Bandizip console tool.",
+  "description": "DeepSeek Harness plugin that drives the local Bandizip console tool (bz.exe) to create, extract, list, and test archives.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "bandizip",
+    "archive",
+    "zip",
+    "7z"
+  ],
+  "license": "MIT",
+  "author": "dafeiyu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dafeiyu/dsh-bandizip.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dafeiyu/dsh-bandizip/issues"
+  },
+  "homepage": "https://github.com/dafeiyu/dsh-bandizip#readme",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",

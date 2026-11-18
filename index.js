@@ -1,13 +1,17 @@
 /**
  * Host half of the Bandizip bundle: registers one model tool that drives the
- * local Bandizip console executable (bz.exe) for create / extract / list / test.
+ * local Bandizip console executable (bz.exe) for create / extract / list / test
+ * and the derived preview / diff / browse / convert actions.
  *
  * The tool never opens a shell: arguments are passed to bz.exe as an argv array,
  * and stdin is closed so that a missing password fails fast instead of waiting
  * for an interactive prompt.
  */
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import {
+  closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
+  renameSync, rmSync, statSync, unlinkSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Schema from '@deepseek-ai/schemastery';
@@ -36,39 +40,10 @@ export const Config = Schema.object({
     .description('每次 bz.exe 调用的最长等待秒数（1-86400）。超过后进程被杀，调用以超时失败。'),
   maxOutputChars: Schema.natural().default(12000).min(500).max(200000).volatile()
     .description('回传给模型的输出上限（字符，500-200000）。超出部分截断，并在末尾标注总长度。'),
-  defaultOverwrite: Schema.union([
-    Schema.const('overwrite'),
-    Schema.const('skip'),
-    Schema.const('rename'),
-  ]).default('overwrite').volatile()
-    .description('解压时未指定 overwrite 的默认策略：覆盖 / 跳过已存在文件 / 保留两者。'),
-  defaultFlat: Schema.boolean().default(false).volatile()
-    .description('解压时默认是否丢弃目录结构（只保留文件）。'),
-  defaultLevel: Schema.natural().default(5).min(0).max(9).volatile()
-    .description('create 未指定 level 时使用的压缩级别（0-9）。0 只打包不压缩、速度最快，9 体积最小但明显更慢。'),
   allowArchiveOverwrite: Schema.boolean().default(false).volatile()
     .description('允许 create 覆盖已存在的同名压缩包。关闭时即使显式传 overwrite:"overwrite" 也会被拒绝，用来防止误删旧包。'),
-  fallbackFormat: Schema.union([
-    Schema.const('auto'),
-    Schema.const('zip'),
-    Schema.const('7z'),
-    Schema.const('tar'),
-    Schema.const('tgz'),
-    Schema.const('gz'),
-    Schema.const('xz'),
-  ]).default('auto').volatile()
-    .description('压缩包名没有可识别的扩展名时用哪种格式。auto 表示直接报错并让调用方显式传 format。'),
-  defaultRecursive: Schema.boolean().default(true).volatile()
-    .description('create 未指定 recursive 时是否递归打包子目录。关闭后只打包每层文件，目录结构不再深入。'),
   allowPassword: Schema.boolean().default(true).volatile()
     .description('是否允许把密码交给 bz.exe。关闭后任何带 password 的调用都会失败；密码以 argv 传递，本机其它进程可见。'),
-  defaultDestination: Schema.union([
-    Schema.const('beside'),
-    Schema.const('cwd'),
-  ]).default('beside').volatile()
-    .description('extract 未指定 destination 时的解压位置。beside 解到压缩包旁的同名文件夹，cwd 解到当前会话工作目录。'),
-  verifyAfterCreate: Schema.boolean().default(false).volatile()
-    .description('create 成功后自动再跑一次完整性校验。更可靠，但每个压缩包多花一次往返时间。'),
   restrictToWorkspace: Schema.boolean().default(false).volatile()
     .description('拒绝工作区之外的 archive / files / destination。开启后会挡掉工作区外的合法跨盘操作，只在需要强边界时启用。'),
 });
@@ -83,9 +58,8 @@ const DEFAULT_TIMEOUT_SECONDS = 15 * 60;
  * this to 1 ms, which would kill every call instantly.
  */
 const MAX_TIMEOUT_SECONDS = 86400;
-/** Fallback format choices: `auto` never guesses, the rest name a real archive format. */
-const FALLBACK_FORMATS = ['auto', 'zip', '7z', 'tar', 'tgz', 'gz', 'xz'];
-const DESTINATION_MODES = ['beside', 'cwd'];
+/** bz's own default level when the caller names none. */
+const DEFAULT_LEVEL = 5;
 const BANNER = /^bz [0-9][^\r\n]*Bandisoft[^\r\n]*\r?\n?/gim;
 /** bz 的清单结尾行，例如 "180 files, 4 folders"。 */
 const COUNT_LINE = /(\d+)\s+files?,\s*(\d+)\s+folders?/i;
@@ -93,6 +67,8 @@ const COUNT_LINE = /(\d+)\s+files?,\s*(\d+)\s+folders?/i;
 const ARCHIVE_EXTENSION = /\.(tar\.gz|tar\.bz2|tgz|tbz2?|tar|zipx?|7z|lzh|lha|iso|gz|xz|rar|exe)$/i;
 
 const FORMATS = ['zip', 'zipx', 'exe', 'tar', 'tgz', 'lzh', 'iso', '7z', 'gz', 'xz'];
+const ENCODINGS = ['auto', 'utf-8', 'gbk'];
+const ACTIONS = ['create', 'extract', 'list', 'test', 'preview', 'diff', 'browse', 'convert'];
 
 const OVERWRITE_SWITCH = {
   overwrite: '-aoa',
@@ -153,8 +129,24 @@ function sessionDirectory(ctx, exec) {
   return process.cwd();
 }
 
-function decode(buffer) {
+/** Decode bz's output with an explicit encoding, or the utf-8→gbk fallback. */
+function decodeWith(buffer, encoding) {
   if (!buffer || buffer.length === 0) return '';
+  const requested = encoding === 'utf-8' || encoding === 'gbk' ? encoding : 'auto';
+  if (requested !== 'auto') {
+    try {
+      return new TextDecoder(requested).decode(buffer);
+    } catch (error) {
+      if (requested === 'gbk') {
+        try {
+          return new TextDecoder('gb18030').decode(buffer);
+        } catch {
+          // fall through to the automatic path
+        }
+      }
+      throw new Error(`Unsupported encoding "${encoding}": ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const utf8 = new TextDecoder('utf-8').decode(buffer);
   if (!utf8.includes('\uFFFD')) return utf8;
   try {
@@ -162,6 +154,11 @@ function decode(buffer) {
   } catch {
     return utf8;
   }
+}
+
+/** Backwards-compatible default decoder. */
+function decode(buffer) {
+  return decodeWith(buffer, 'auto');
 }
 
 /** 只做规范化（换行、banner、多余空行）；截断是另一步，filter 和计数必须在未截断文本上做。 */
@@ -225,16 +222,8 @@ function readRowConfig(ctx, fallback) {
     bzPath: typeof fallback?.bzPath === 'string' ? fallback.bzPath : '',
     timeoutSeconds: clampTimeoutSeconds(fallback?.timeoutSeconds),
     maxOutputChars: clampMaxOutputChars(fallback?.maxOutputChars),
-    defaultOverwrite: isOverwriteMode(fallback?.defaultOverwrite) ? fallback.defaultOverwrite : 'overwrite',
-    defaultFlat: fallback?.defaultFlat === true,
-    // The schema owns the 0..9 bound; this only refuses a value that bypassed it.
-    defaultLevel: isLevel(fallback?.defaultLevel) ? fallback.defaultLevel : 5,
     allowArchiveOverwrite: fallback?.allowArchiveOverwrite === true,
-    fallbackFormat: isFallbackFormat(fallback?.fallbackFormat) ? fallback.fallbackFormat : 'auto',
-    defaultRecursive: fallback?.defaultRecursive !== false,
     allowPassword: fallback?.allowPassword !== false,
-    defaultDestination: isDestinationMode(fallback?.defaultDestination) ? fallback.defaultDestination : 'beside',
-    verifyAfterCreate: fallback?.verifyAfterCreate === true,
     restrictToWorkspace: fallback?.restrictToWorkspace === true,
   };
   try {
@@ -245,15 +234,8 @@ function readRowConfig(ctx, fallback) {
     if (typeof values?.bzPath === 'string') merged.bzPath = values.bzPath;
     if (values?.timeoutSeconds !== undefined) merged.timeoutSeconds = clampTimeoutSeconds(values.timeoutSeconds);
     if (values?.maxOutputChars !== undefined) merged.maxOutputChars = clampMaxOutputChars(values.maxOutputChars);
-    if (isOverwriteMode(values?.defaultOverwrite)) merged.defaultOverwrite = values.defaultOverwrite;
-    if (values?.defaultFlat !== undefined) merged.defaultFlat = values.defaultFlat === true;
-    if (values?.defaultLevel !== undefined) merged.defaultLevel = isLevel(values.defaultLevel) ? values.defaultLevel : 5;
     if (values?.allowArchiveOverwrite !== undefined) merged.allowArchiveOverwrite = values.allowArchiveOverwrite === true;
-    if (isFallbackFormat(values?.fallbackFormat)) merged.fallbackFormat = values.fallbackFormat;
-    if (values?.defaultRecursive !== undefined) merged.defaultRecursive = values.defaultRecursive !== false;
     if (values?.allowPassword !== undefined) merged.allowPassword = values.allowPassword !== false;
-    if (isDestinationMode(values?.defaultDestination)) merged.defaultDestination = values.defaultDestination;
-    if (values?.verifyAfterCreate !== undefined) merged.verifyAfterCreate = values.verifyAfterCreate === true;
     if (values?.restrictToWorkspace !== undefined) merged.restrictToWorkspace = values.restrictToWorkspace === true;
   } catch {
     // No reachable profile row: keep the activation config.
@@ -261,24 +243,9 @@ function readRowConfig(ctx, fallback) {
   return merged;
 }
 
-/** `true` when the value is an integer compression level the schema would accept. */
+/** `true` when the value is an integer compression level bz accepts. */
 function isLevel(value) {
   return Number.isInteger(value) && value >= 0 && value <= 9;
-}
-
-/** `true` when the value names one of the fallback-format choices. */
-function isFallbackFormat(value) {
-  return typeof value === 'string' && FALLBACK_FORMATS.includes(value);
-}
-
-/** `true` when the value names one of the destination modes. */
-function isDestinationMode(value) {
-  return typeof value === 'string' && DESTINATION_MODES.includes(value);
-}
-
-/** `true` when the value names one of the three overwrite switches. */
-function isOverwriteMode(value) {
-  return typeof value === 'string' && OVERWRITE_SWITCH[value] !== undefined;
 }
 
 /**
@@ -334,22 +301,96 @@ function filterListing(text, needle) {
   return [...lines.slice(0, headEnd), ...hits, ...totals].join('\n');
 }
 
+/**
+ * 把清单里每一条目解析成结构化记录。
+ * bz 的 `l` 输出形如：
+ *   2026-11-18 20:32:40 D___            0            0 src\
+ *   2026-11-18 20:32:40 A___            5            5 src\a.txt
+ * 表头到分隔线为止；条目行的属性列是 D___ / A___ 等 4 字符标记。
+ * 原始文本（未截断）进来，保证大包所有条目都被解析。
+ */
+function parseListing(text) {
+  const lines = text.split('\n');
+  const firstSep = lines.findIndex((line) => /^-{5,}/.test(line));
+  const entries = [];
+  const linePattern = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+(\d+)\s+(\d+)\s+(.+)$/;
+  for (let i = firstSep === -1 ? 0 : firstSep + 1; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    // The trailing totals line ("25 29 4 files, 3 folders") is not an entry.
+    if (COUNT_LINE.test(trimmed)) continue;
+    const match = linePattern.exec(trimmed);
+    if (!match) continue;
+    const [, attr, sizeStr, compSizeStr, rawName] = match;
+    const name = rawName.trim().replace(/\\/g, '/');
+    if (name === '' || COUNT_LINE.test(name)) continue;
+    const isDir = /^D/.test(attr);
+    entries.push({
+      name,
+      size: Number(sizeStr),
+      compressedSize: Number(compSizeStr),
+      isDir,
+    });
+  }
+  return entries;
+}
+
+/** 统一路径为正斜杠、相对包根，去掉开头的 "./"。 */
+function normalizeEntryPath(raw) {
+  return String(raw).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+/** 把通配模式（* 与 **）编译成 RegExp；* 不跨 /，** 跨 /。 */
+function compileGlob(pattern) {
+  let out = '^';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const c = pattern[i];
+    if (c === '*') {
+      if (pattern[i + 1] === '*') {
+        i += 1;
+        if (pattern[i + 1] === '/') {
+          i += 1;
+          out += '(?:.*/)?';
+        } else {
+          out += '.*';
+        }
+      } else {
+        out += '[^/]*';
+      }
+    } else if (c === '?') {
+      out += '[^/]';
+    } else {
+      out += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`${out}$`);
+}
+
 /** bz 把 warning 混在正常输出里；只看退出码 1 并不知道它丢了哪些文件。 */
 function warningsOf(text) {
   return text.split('\n').filter((line) => /^(Warning|Error)\b/.test(line.trim()));
 }
 
 /** -l 只接受 0..9 的整数；静默夹取会让调用方以为限定了别的级别。 */
-function parseLevel(requested, configuredDefault) {
-  if (requested === undefined || requested === null) {
-    // The plugin's defaultLevel is the documented "when omitted" source; 5 is only the
-    // last resort, matching the schema default.
-    return isLevel(configuredDefault) ? configuredDefault : 5;
-  }
+function parseLevel(requested) {
+  // bz's own default is the documented "when omitted" behaviour; the caller
+  // decides per archive and says so, rather than inheriting an operator setting.
+  if (requested === undefined || requested === null) return DEFAULT_LEVEL;
   if (!Number.isInteger(requested) || requested < 0 || requested > 9) {
     throw new Error(`level must be an integer from 0 to 9, got ${JSON.stringify(requested)}.`);
   }
   return requested;
+}
+
+/**
+ * Resolve an optional integer tool argument, rejecting non-integers and values
+ * outside [min, max]. Used for `limit` / `offset` / `depth` / `timeoutSeconds`.
+ */
+function parseOptionalInt(value, name, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer from ${min} to ${max}, got ${JSON.stringify(value)}.`);
+  }
+  return value;
 }
 
 /**
@@ -439,16 +480,57 @@ function assertInsideWorkspace(target, cwd, what) {
 }
 
 /** 直接向压缩包要条目数：解压后的统计不能把目标目录里原有的文件算进来。 */
-async function listEntryCount(run, archivePath, password, allowPassword) {
+async function listEntryCount(run, archivePath, password, allowPassword, encoding) {
   try {
     const argv = ['l', '-y'];
     if (password) argv.push(passwordArg(password, allowPassword));
     argv.push(archivePath);
     const result = await run(argv);
     if (result.exitCode !== 0) return undefined;
-    return countsFromListing(normalizeOutput(decode(result.output)));
+    return countsFromListing(normalizeOutput(decodeWith(result.output, encoding)));
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * List an archive once, returning the normalized full (UNTRUNCATED) text plus
+ * the parsed entry records. Every structured feature (limit/offset, preview,
+ * diff, browse, dryRun, extract manifest) builds on this function.
+ */
+async function listArchive(run, archivePath, password, allowPassword, encoding) {
+  const argv = ['l', '-y'];
+  if (password) argv.push(passwordArg(password, allowPassword));
+  argv.push(archivePath);
+  const result = await run(argv);
+  const normalized = normalizeOutput(decodeWith(result.output, encoding));
+  return {
+    exitCode: result.exitCode,
+    ok: result.exitCode === 0,
+    text: normalized,
+    entries: parseListing(normalized),
+    counts: countsFromListing(normalized),
+  };
+}
+
+/**
+ * Create-overwrite gate shared by `create` (fresh) and `convert` (target).
+ * Checks both the config switch and the explicit `overwrite:"overwrite"` request.
+ */
+function assertCreateOverwrite(artifactPath, existedBefore, overwrite, settings) {
+  if (!existedBefore) return;
+  if (settings.allowArchiveOverwrite === false) {
+    throw new Error(
+      `Archive already exists: ${artifactPath}. Replacing it is disabled by the plugin `
+        + 'configuration (allowArchiveOverwrite: false). Enable it on the plugin page, '
+        + 'or choose another archive name.',
+    );
+  }
+  if (overwrite !== 'overwrite') {
+    throw new Error(
+      `Archive already exists: ${artifactPath}. Pass overwrite:"overwrite" to replace it, `
+        + 'or choose another archive name.',
+    );
   }
 }
 
@@ -567,7 +649,7 @@ function countFiles(root, limit = 20000) {
   return { files, folders };
 }
 
-function detectFormat(archivePath, requested, fallbackFormat = 'auto') {
+function detectFormat(archivePath, requested) {
   if (requested) {
     const normalized = requested.replace(/^\./, '').toLowerCase();
     if (!FORMATS.includes(normalized)) {
@@ -579,13 +661,39 @@ function detectFormat(archivePath, requested, fallbackFormat = 'auto') {
   if (lower.endsWith('.tar.gz')) return 'tgz';
   const detected = FORMAT_BY_EXTENSION[path.extname(lower)];
   if (detected) return detected;
-  // A configured fallback answers the ambiguous name; `auto` deliberately still fails so
-  // the caller names a format instead of getting a format nobody asked for.
-  if (fallbackFormat !== 'auto' && FORMATS.includes(fallbackFormat)) return fallbackFormat;
+  // No silent guess: the caller names a format, so the result is never a format
+  // nobody asked for. The error text says exactly what to pass.
   throw new Error(
     `Cannot infer an archive format from "${path.basename(archivePath)}". `
       + `Pass format with one of: ${FORMATS.join(', ')}.`,
   );
+}
+
+/** Resolve the "." stem of an archive name, with the same suffix rules extract uses. */
+function archiveStem(archivePath) {
+  const baseName = path.basename(archivePath);
+  const stem = baseName.replace(ARCHIVE_EXTENSION, '');
+  return stem === baseName || stem === '' ? `${baseName} extracted` : stem;
+}
+
+/** Aggregate files by their extension (lowercase, including the dot; "<none>" for none). */
+function byExtension(entries) {
+  const counts = {};
+  for (const entry of entries) {
+    if (entry.isDir) continue;
+    const base = entry.name.split('/').pop() ?? '';
+    const dot = base.lastIndexOf('.');
+    const ext = dot > 0 ? base.slice(dot).toLowerCase() : '<none>';
+    counts[ext] = (counts[ext] ?? 0) + 1;
+  }
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([extension, count]) => ({ extension, count }));
+}
+
+/** Guess whether an entry is a nested archive by its extension. */
+function looksLikeArchive(name) {
+  return ARCHIVE_EXTENSION.test(name);
 }
 
 /**
@@ -620,25 +728,39 @@ export function apply(ctx, config) {
       + 'Supports zip, zipx, 7z, tar, tgz, gz, xz, iso, lzh, and self-extracting exe; '
       + 'reading rar and other formats is supported by extraction and listing. '
       + 'Relative paths resolve against the session working directory. '
-      + 'Actions: create (compress files or folders into a new archive), extract (unpack into a directory), '
-      + 'list (show archive contents), test (verify integrity and passwords). '
+      + 'Actions: create (compress files/folders, with optional append mode and glob include), '
+      + 'extract (unpack into a directory, with include/exclude masks, dry-run and zip-slip checks), '
+      + 'list (show contents, with pagination), test (verify integrity and passwords), '
+      + 'preview (inspect contents without extracting, with size/extension statistics), '
+      + 'diff (compare two archives by entry size), browse (tree-browser of one folder level), '
+      + 'convert (repack an archive into another format, level or password). '
       + 'The tool is non-interactive: supply password for protected archives (unless the plugin '
-      + 'disables passwords). Omitted arguments fall back to the plugin settings: level to '
-      + 'defaultLevel, recursive to defaultRecursive, extract overwrite to defaultOverwrite, flat to '
-      + 'defaultFlat, and destination to defaultDestination. create refuses to replace an existing '
-      + 'archive unless allowArchiveOverwrite is on AND overwrite:"overwrite" is passed explicitly.',
+      + 'disables passwords). Every behaviour is decided per call - level (default 5), recursive '
+      + '(default true), overwrite (default overwrite), flat (default false), mode (default create), '
+      + 'encoding (default auto) and destination (default: a folder beside the archive) - so state '
+      + 'each one when it matters. A per-call timeoutSeconds overrides the configured timeout. '
+      + 'create refuses to replace an existing archive unless allowArchiveOverwrite is on AND '
+      + 'overwrite:"overwrite" is passed explicitly; convert uses the same gate for its target.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'extract', 'list', 'test'],
-          description: 'Operation to perform.',
+          enum: ACTIONS,
+          description:
+            'Operation to perform. create / extract / list / test are the basic actions; '
+            + 'preview / diff / browse / convert are derived inspections and repacking.',
         },
         archive: {
           type: 'string',
-          description: 'Archive path. The archive to read for extract/list/test, or the archive to write for create.',
+          description:
+            'Archive path. The archive to read for extract/list/test/preview/browse/convert and for '
+            + 'diff (first archive), or the archive to write for create.',
+        },
+        archive2: {
+          type: 'string',
+          description: 'diff only: the second archive to compare against archive.',
         },
         files: {
           type: 'array',
@@ -648,61 +770,139 @@ export function apply(ctx, config) {
             + 'Paths inside the archive keep their location relative to the session working directory, '
             + 'so a working-directory-relative path such as "src" appears as "src/..." in the archive.',
         },
+        include: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'create: glob patterns (* and **) matched against paths relative to the session working '
+            + 'directory; only matching files/folders are added, and an empty match set is an error. '
+            + 'extract: archive-internal masks (* and **) selecting which entries to unpack.',
+        },
+        exclude: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'extract only: archive-internal masks (* and **); matching entries are excluded by listing '
+            + 'the archive and extracting the remaining files one by one.',
+        },
         destination: {
           type: 'string',
           description:
             'extract only: folder to unpack into, created when missing. '
-            + 'Omit it to follow the plugin\'s defaultDestination setting: "beside" (a folder named '
-            + 'after the archive, next to it) or "cwd" (the session working directory).',
+            + 'Omit it to unpack beside the archive, into a folder named after it.',
         },
         format: {
           type: 'string',
           enum: FORMATS,
           description:
-            'create only: archive format. Omit it to infer from the archive extension; when the name '
-            + 'has no recognizable extension the plugin\'s fallbackFormat setting decides, and '
-            + 'fallbackFormat:"auto" fails instead of guessing.',
+            'create and convert: archive format. Omit it to infer from the archive extension; a name '
+            + 'with no recognizable extension is rejected, so pass format explicitly for those. '
+            + 'For convert this is the target format.',
         },
         level: {
           type: 'integer',
           description:
-            'create only: compression level from 0 (store) to 9 (maximum). Omit it to use the '
-            + 'plugin\'s defaultLevel setting. A non-integer or out-of-range value is rejected '
-            + 'instead of being silently adjusted.',
+            'create and convert: compression level from 0 (store) to 9 (maximum). Omit it for 5. '
+            + 'A non-integer or out-of-range value is rejected instead of being silently adjusted.',
         },
         password: {
           type: 'string',
           description:
-            'Password for creating or reading an encrypted archive. '
+            'Password for creating, reading, or converting an encrypted archive. '
+            + 'For convert this is the password used to read the source. '
             + 'Passed to bz.exe as a command-line switch, so it is visible in the process list. '
-            + 'Rejected outright when the plugin\'s allowPassword setting is off.',
+            + "Rejected outright when the plugin's allowPassword setting is off.",
+        },
+        newPassword: {
+          type: 'string',
+          description:
+            'convert only: password for the new archive (write). Omit it to produce an unencrypted '
+            + 'archive. Subject to the same allowPassword gate as password.',
+        },
+        deleteSource: {
+          type: 'boolean',
+          description:
+            'convert only: delete the source archive after the converted archive is in place and '
+            + 'verified. Default false. Ignored on failure.',
+        },
+        mode: {
+          type: 'string',
+          enum: ['create', 'append'],
+          description:
+            'create only: create writes a new archive (subject to the overwrite gate); append uses '
+            + 'bz\'s "a" command to add to an existing archive without the overwrite gate. If the '
+            + 'archive does not exist, append falls back to create. Default create.',
         },
         overwrite: {
           type: 'string',
           enum: ['overwrite', 'skip', 'rename'],
           description:
-            'extract: what to do with existing files. omit it to use the plugin\'s defaultOverwrite '
-            + 'setting (which itself defaults to overwrite). overwrite replaces them, '
-            + 'skip leaves them untouched, rename keeps both by renaming the incoming file. '
-            + 'create: this argument only gates replacing an existing archive; the plugin\'s '
-            + 'defaultOverwrite setting does NOT apply to create. Pass overwrite:"overwrite" to '
-            + 'replace an existing archive; create fails otherwise.',
+            'extract: what to do with existing files. Omit it for overwrite. '
+            + 'overwrite replaces them, skip leaves them untouched, rename keeps both by renaming '
+            + 'the incoming file. '
+            + 'create and convert: this argument only gates replacing an existing archive. Pass '
+            + 'overwrite:"overwrite" to replace it; create/convert fail otherwise.',
         },
         recursive: {
           type: 'boolean',
           description:
-            'create only: include subdirectories of every folder. '
-            + 'Omit it to use the plugin\'s defaultRecursive setting.',
+            'create only: include subdirectories of every folder. Omit it to recurse (the default).',
         },
         flat: {
           type: 'boolean',
           description:
             'extract only: drop directory names and write every file directly into destination. '
-            + 'Omit it to use the plugin\'s defaultFlat setting (which itself defaults to false).',
+            + 'Omit it to keep the archive structure (the default).',
+        },
+        verify: {
+          type: 'boolean',
+          description:
+            'create only: run a full integrity check on the new archive before reporting success. '
+            + 'Costs one extra bz round trip; a failed check is reported but does not delete the file.',
+        },
+        dryRun: {
+          type: 'boolean',
+          description:
+            'extract only: report what would be created, overwritten and skipped without writing anything. '
+            + 'Entry names that would escape the destination are refused by the same check a real extract runs.',
         },
         filter: {
           type: 'string',
           description: 'list only: case-insensitive text that a listing line must contain to be returned.',
+        },
+        limit: {
+          type: 'integer',
+          description:
+            'list only: maximum number of parsed entries to return (after offset). Omit it to return '
+            + 'all entries up to the output cap. Use with nextOffset to page through a large list.',
+        },
+        offset: {
+          type: 'integer',
+          description: 'list only: number of parsed entries to skip before returning. Default 0.',
+        },
+        encoding: {
+          type: 'string',
+          enum: ENCODINGS,
+          description:
+            'list and extract only: output encoding. auto (default) tries UTF-8 then falls back to GBK; '
+            + 'utf-8 and gbk force a specific decoder.',
+        },
+        timeoutSeconds: {
+          type: 'integer',
+          description:
+            'Per-call timeout in seconds, 1-86400. Overrides the configured timeout for this call only.',
+        },
+        path: {
+          type: 'string',
+          description:
+            'browse only: archive-internal prefix (folder path) to browse. Omit it (or use "") for the root. '
+            + 'Forward or back slashes are both accepted; separators in the response are forward slashes.',
+        },
+        depth: {
+          type: 'integer',
+          description:
+            'browse only: how many path segments below path to treat as immediate children. Default 1 '
+            + '(one level). Higher values group deeper paths into the current level.',
         },
       },
       required: ['action', 'archive'],
@@ -714,6 +914,7 @@ export function apply(ctx, config) {
         properties: {
           action: { type: 'string' },
           archive: { type: 'string' },
+          archive2: { type: 'string' },
           destination: { type: 'string' },
           ok: { type: 'boolean' },
           exitCode: { type: 'integer' },
@@ -723,6 +924,35 @@ export function apply(ctx, config) {
           files: { type: 'integer' },
           folders: { type: 'integer' },
           size: { type: 'integer' },
+          total: { type: 'integer' },
+          nextOffset: { type: 'integer' },
+          offset: { type: 'integer' },
+          limit: { type: 'integer' },
+          path: { type: 'string' },
+          browseFiles: { type: 'array' },
+          entries: { type: 'array' },
+          entryCount: { type: 'integer' },
+          entriesTruncated: { type: 'boolean' },
+          byExtension: { type: 'array' },
+          topLevelDirs: { type: 'array' },
+          largest: { type: 'array' },
+          totalUncompressedBytes: { type: 'integer' },
+          added: { type: 'array' },
+          removed: { type: 'array' },
+          changed: { type: 'array' },
+          note: { type: 'string' },
+          dirs: { type: 'array' },
+          nestedArchives: { type: 'array' },
+          mode: { type: 'string' },
+          convertedTo: { type: 'string' },
+          sourceDeleted: { type: 'boolean' },
+          wouldCreate: { type: 'integer' },
+          wouldOverwrite: { type: 'integer' },
+          wouldSkip: { type: 'integer' },
+          conflicts: { type: 'array' },
+          rejected: { type: 'boolean' },
+          singleTopLevelDir: { type: 'string' },
+          landedFiles: { type: 'array' },
         },
         required: ['action', 'archive', 'ok', 'exitCode', 'summary', 'output'],
       },
@@ -738,9 +968,9 @@ export function apply(ctx, config) {
       title: `bandizip ${args?.action ?? ''} ${archiveLabel(args?.archive)}`.trim(),
       // A password is a secret: the call card is rendered and persisted, so it
       // must not echo the value back (the argv itself only reaches bz).
-      rawInput: args?.password === undefined
+      rawInput: args?.password === undefined && args?.newPassword === undefined
         ? args
-        : { ...args, password: '***' },
+        : { ...args, ...(args?.password === undefined ? {} : { password: '***' }), ...(args?.newPassword === undefined ? {} : { newPassword: '***' }) },
     }),
     presentResult: (args, result) => {
       const content = Array.isArray(result?.content) ? result.content : [];
@@ -755,7 +985,7 @@ export function apply(ctx, config) {
         content: [{ type: 'text', text: text || 'bandizip: no output' }],
       };
     },
-    isConcurrencySafe: (args) => args?.action === 'list' || args?.action === 'test',
+    isConcurrencySafe: (args) => ['list', 'test', 'preview', 'diff', 'browse'].includes(args?.action),
     async execute(args, exec) {
       // `enabled` is a `.volatile()` field, so turning it off does not re-run
       // `apply` and cannot unregister this tool. Refuse at call time instead, so
@@ -764,8 +994,8 @@ export function apply(ctx, config) {
         throw new Error('bandizip is disabled in the plugin configuration; enable it on the plugin page to use this tool.');
       }
       const action = args?.action;
-      if (!['create', 'extract', 'list', 'test'].includes(action)) {
-        throw new Error(`Unsupported action "${String(action)}". Use create, extract, list, or test.`);
+      if (!ACTIONS.includes(action)) {
+        throw new Error(`Unsupported action "${String(action)}". Use ${ACTIONS.join(', ')}.`);
       }
       const cwd = sessionDirectory(ctx, exec);
       // One snapshot per call: a volatile write mid-call cannot make the timeout and the
@@ -775,88 +1005,341 @@ export function apply(ctx, config) {
       if (settings.restrictToWorkspace) assertInsideWorkspace(archivePath, cwd, 'archive');
       const password = typeof args.password === 'string' && args.password !== '' ? args.password : undefined;
       const maxOutputChars = settings.maxOutputChars;
-      const run = (argv) => runBz(bz(), argv, {
-        cwd,
+      // Item 1: per-call timeoutSeconds overrides the configured value, validated 1..86400.
+      const callTimeout = parseOptionalInt(args.timeoutSeconds, 'timeoutSeconds', { min: 1, max: MAX_TIMEOUT_SECONDS });
+      const effectiveTimeoutSeconds = callTimeout ?? settings.timeoutSeconds;
+      const encoding = args.encoding === undefined ? 'auto' : args.encoding;
+      if (!ENCODINGS.includes(encoding)) {
+        throw new Error(`encoding must be one of ${ENCODINGS.join(', ')}, got ${JSON.stringify(encoding)}.`);
+      }
+      const run = (argv, overrideCwd) => runBz(bz(), argv, {
+        cwd: overrideCwd ?? cwd,
         signal: exec.signal,
-        timeoutMs: settings.timeoutSeconds * 1000,
+        timeoutMs: effectiveTimeoutSeconds * 1000,
       });
 
+      // ---------------------------------------------------------------- list / test
       if (action === 'list' || action === 'test') {
         if (!existsSync(archivePath)) throw new Error(`Archive not found: ${archivePath}`);
-        const argv = [action === 'list' ? 'l' : 't', '-y'];
-        if (password) argv.push(passwordArg(password, settings.allowPassword));
-        argv.push(archivePath);
-        const result = await run(argv);
-        // 计数和 filter 都作用在未截断的文本上：先截断会让大压缩包后半截永远搜不到，
-        // 也会把结尾的 totals 行一并砍掉。
-        const normalized = normalizeOutput(decode(result.output));
-        const entryCount = action === 'list' ? countsFromListing(normalized) : undefined;
-        const filtered = action === 'list' && typeof args.filter === 'string' && args.filter !== ''
-          ? filterListing(normalized, args.filter)
-          : normalized;
-        const decoded = truncateOutput(filtered, maxOutputChars);
-        const ok = result.exitCode === 0;
-        const summary = ok
+        const listing = await listArchive(run, archivePath, password, settings.allowPassword, encoding);
+        const decoded = truncateOutput(listing.text, maxOutputChars);
+        const ok = listing.ok;
+        let summary = ok
           ? action === 'list'
             ? `Listed ${path.basename(archivePath)}`
-              + (entryCount ? ` (${entryCount.files} files, ${entryCount.folders} folders)` : '')
+              + (listing.counts ? ` (${listing.counts.files} files, ${listing.counts.folders} folders)` : '')
             : `Archive ${path.basename(archivePath)} passed the integrity test`
-          : `bz.exe exited with code ${result.exitCode}`;
-        return {
+          : `bz.exe exited with code ${listing.exitCode}`;
+        const result = {
           action,
           archive: archivePath,
           ok,
-          exitCode: result.exitCode,
+          exitCode: listing.exitCode,
           summary,
           output: decoded.text,
           truncated: decoded.truncated,
-          ...(entryCount ?? {}),
+          ...(listing.counts ?? {}),
+        };
+        if (action === 'list') {
+          // Item 2: limit/offset pagination. Slice the PARSED entries (from the
+          // untruncated text), then report total and the next page's offset.
+          const offset = parseOptionalInt(args.offset, 'offset', { min: 0 }) ?? 0;
+          const limit = parseOptionalInt(args.limit, 'limit', { min: 1 });
+          const filtered = typeof args.filter === 'string' && args.filter !== ''
+            ? listing.text.split('\n').filter((line) => line.toLowerCase().includes(args.filter.toLowerCase())).join('\n')
+            : listing.text;
+          const sourceEntries = typeof args.filter === 'string' && args.filter !== ''
+            ? parseListing(filtered)
+            : listing.entries;
+          const total = sourceEntries.length;
+          const page = sourceEntries.slice(offset, limit === undefined ? undefined : offset + limit);
+          result.output = truncateOutput(page.map((e) => `${e.isDir ? 'D' : ' '} ${e.size}\t${e.name}`).join('\n'), maxOutputChars).text;
+          result.total = total;
+          result.offset = offset;
+          if (limit !== undefined) {
+            result.limit = limit;
+            result.nextOffset = offset + page.length < total ? offset + page.length : null;
+          }
+          if (page.length !== sourceEntries.length || limit !== undefined) {
+            result.summary += `; page ${offset + 1}-${offset + page.length} of ${total} entries`;
+          }
+          return result;
+        }
+        return result;
+      }
+
+      // ---------------------------------------------------------------- preview
+      if (action === 'preview') {
+        if (!existsSync(archivePath)) throw new Error(`Archive not found: ${archivePath}`);
+        const listing = await listArchive(run, archivePath, password, settings.allowPassword, encoding);
+        if (!listing.ok) {
+          return {
+            action, archive: archivePath, ok: false, exitCode: listing.exitCode,
+            summary: `bz.exe exited with code ${listing.exitCode}`, output: listing.text, truncated: false,
+          };
+        }
+        // Item 6: topLevelDirs (entry count + uncompressed size), byExtension,
+        // largest 10, and total uncompressed bytes - all from the untruncated listing.
+        const files = listing.entries.filter((e) => !e.isDir);
+        const topMap = new Map();
+        for (const entry of listing.entries) {
+          const top = entry.name.split('/')[0];
+          if (!top) continue;
+          const current = topMap.get(top) ?? { name: top, entryCount: 0, uncompressedBytes: 0 };
+          current.entryCount += 1;
+          current.uncompressedBytes += entry.size;
+          topMap.set(top, current);
+        }
+        const topLevelDirs = [...topMap.values()].sort((a, b) => b.entryCount - a.entryCount || a.name.localeCompare(b.name));
+        const largest = [...files].sort((a, b) => b.size - a.size).slice(0, 10).map((e) => ({ name: e.name, size: e.size }));
+        const totalUncompressedBytes = files.reduce((sum, e) => sum + e.size, 0);
+        const decoded = truncateOutput(listing.text, maxOutputChars);
+        return {
+          action, archive: archivePath, ok: true, exitCode: 0,
+          summary: `Previewed ${path.basename(archivePath)} (${files.length} files, ${listing.counts?.folders ?? 0} folders, ${totalUncompressedBytes} bytes uncompressed)`,
+          output: decoded.text, truncated: decoded.truncated,
+          files: files.length, folders: listing.counts?.folders ?? 0,
+          // `entries` is the entry LIST elsewhere; a preview reports only its size.
+          entryCount: listing.entries.length, byExtension: byExtension(listing.entries),
+          topLevelDirs, largest, totalUncompressedBytes,
         };
       }
 
+      // ---------------------------------------------------------------- diff
+      if (action === 'diff') {
+        if (!args.archive2) throw new Error('diff requires archive2: the second archive to compare.');
+        const archive2 = path.resolve(cwd, String(args.archive2));
+        if (settings.restrictToWorkspace) assertInsideWorkspace(archive2, cwd, 'archive2');
+        if (!existsSync(archive2)) throw new Error(`Archive not found: ${archive2}`);
+        const [left, right] = await Promise.all([
+          listArchive(run, archivePath, password, settings.allowPassword, encoding),
+          listArchive(run, archive2, password, settings.allowPassword, encoding),
+        ]);
+        if (!left.ok || !right.ok) {
+          throw new Error(`diff failed: ${path.basename(archivePath)} exited ${left.exitCode}, ${path.basename(archive2)} exited ${right.exitCode}.`);
+        }
+        // Item 7: compare by (name, size); only name+size are available in bz's listing.
+        const keyOf = (e) => `${e.isDir ? 'D:' : 'F:'}${e.name}`;
+        const leftMap = new Map(left.entries.map((e) => [keyOf(e), e]));
+        const rightMap = new Map(right.entries.map((e) => [keyOf(e), e]));
+        const added = right.entries.filter((e) => !leftMap.has(keyOf(e))).map((e) => ({ name: e.name, size: e.size }));
+        const removed = left.entries.filter((e) => !rightMap.has(keyOf(e))).map((e) => ({ name: e.name, size: e.size }));
+        const changed = left.entries
+          .filter((e) => {
+            const other = rightMap.get(keyOf(e));
+            return other && other.size !== e.size;
+          })
+          .map((e) => ({ name: e.name, from: e.size, to: rightMap.get(keyOf(e)).size }));
+        const detail = (arr) => arr.slice(0, 20);
+        const note = '大小相同的内容改动检测不到：bz 清单只提供条目名与大小，仅按 size 判定 changed，内容变化但大小相同的条目无法显示。';
+        const line = (label, arr) => `${label} ${arr.length} 条${arr.length > 20 ? '（仅前 20 条）' : ''}`;
+        return {
+          action, archive: archivePath, archive2, ok: true, exitCode: 0,
+          summary: `diff ${path.basename(archivePath)} -> ${path.basename(archive2)}: ${line('added', added)}, ${line('removed', removed)}, ${line('changed', changed)}. ${note}`,
+          output: '', truncated: false, note,
+          added: detail(added), removed: detail(removed), changed: detail(changed),
+        };
+      }
+
+      // ---------------------------------------------------------------- browse
+      if (action === 'browse') {
+        if (!existsSync(archivePath)) throw new Error(`Archive not found: ${archivePath}`);
+        const depth = parseOptionalInt(args.depth, 'depth', { min: 1, max: 100 }) ?? 1;
+        const prefix = normalizeEntryPath(args.path ?? '');
+        const listing = await listArchive(run, archivePath, password, settings.allowPassword, encoding);
+        if (!listing.ok) {
+          return {
+            action, archive: archivePath, ok: false, exitCode: listing.exitCode,
+            summary: `bz.exe exited with code ${listing.exitCode}`, output: listing.text, truncated: false,
+          };
+        }
+        // Item 8: group entries under `path` into immediate children. dirs carry
+        // aggregated fileCount + size; files carry their own size. All names use "/".
+        const base = prefix === '' ? '' : `${prefix.replace(/\/$/, '')}/`;
+        const children = listing.entries.filter((e) => {
+          const name = normalizeEntryPath(e.name);
+          return base === '' ? true : name.startsWith(base) && name !== base.slice(0, -1);
+        });
+        const childMap = new Map();
+        for (const entry of children) {
+          const rest = base === '' ? entry.name : entry.name.slice(base.length);
+          if (!rest) continue;
+          const segments = rest.split('/').filter(Boolean);
+          const name = segments.slice(0, depth).join('/');
+          if (!name) continue;
+          const isDir = segments.length > depth || entry.isDir;
+          const current = childMap.get(name) ?? { name, isDir, fileCount: 0, size: 0 };
+          if (!entry.isDir) current.fileCount += 1;
+          current.size += entry.size;
+          childMap.set(name, current);
+        }
+        const dirs = [];
+        const files = [];
+        for (const entry of childMap.values()) {
+          if (entry.isDir) dirs.push({ name: entry.name, fileCount: entry.fileCount, size: entry.size });
+          else files.push({ name: entry.name, size: entry.size });
+        }
+        dirs.sort((a, b) => a.name.localeCompare(b.name));
+        files.sort((a, b) => a.name.localeCompare(b.name));
+        const decoded = truncateOutput(listing.text, maxOutputChars);
+        return {
+          action, archive: archivePath, ok: true, exitCode: 0,
+          summary: `Browsed ${prefix || '/'}: ${dirs.length} dirs, ${files.length} files`,
+          output: decoded.text, truncated: decoded.truncated,
+          path: prefix, dirs, browseFiles: files,
+        };
+      }
+
+      // ---------------------------------------------------------------- convert
+      if (action === 'convert') {
+        if (!existsSync(archivePath)) throw new Error(`Archive not found: ${archivePath}`);
+        const targetFormat = detectFormat(archivePath, typeof args.format === 'string' ? args.format : undefined);
+        const level = parseLevel(args.level);
+        const newPassword = typeof args.newPassword === 'string' && args.newPassword !== '' ? args.newPassword : undefined;
+        const targetPath = path.resolve(cwd, archivePath.replace(ARCHIVE_EXTENSION, '') + `.${targetFormat}`);
+        if (targetPath === archivePath) throw new Error('convert target equals the source archive; choose a different format or name.');
+        if (settings.restrictToWorkspace) assertInsideWorkspace(targetPath, cwd, 'convert target');
+        const existedBefore = existsSync(targetPath);
+        // Item 9: reuse the create overwrite gate for an existing target.
+        assertCreateOverwrite(targetPath, existedBefore, args.overwrite, settings);
+        // Extract the whole source into a fresh temp dir (no interaction, overwrite all).
+        const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'dsh-bandizip-convert-'));
+        const unpackDir = path.join(tempRoot, 'src');
+        mkdirSync(unpackDir);
+        try {
+          const argvX = ['x', `-o:${unpackDir}`, OVERWRITE_SWITCH.overwrite, '-y'];
+          if (password) argvX.push(passwordArg(password, settings.allowPassword));
+          argvX.push(archivePath);
+          const extracted = await run(argvX);
+          if (extracted.exitCode !== 0) {
+            return {
+              action, archive: archivePath, ok: false, exitCode: extracted.exitCode,
+              summary: `bz.exe failed to unpack source with code ${extracted.exitCode}`, output: cleanOutput(decodeWith(extracted.output, encoding), maxOutputChars).text, truncated: false,
+            };
+          }
+          // bz c -fmt:<fmt> -l:<level> [-p:<pw>] -r -y <target> <files...>
+          const argvC = ['c', `-fmt:${targetFormat}`, `-l:${level}`, '-r', '-y'];
+          if (newPassword) argvC.push(passwordArg(newPassword, settings.allowPassword));
+          argvC.push(targetPath, './*');
+          const created = await run(argvC, unpackDir);
+          if (!existsSync(targetPath)) {
+            return {
+              action, archive: archivePath, ok: false, exitCode: created.exitCode,
+              summary: 'bz.exe did not create the converted archive', output: cleanOutput(decodeWith(created.output, encoding), maxOutputChars).text, truncated: false,
+            };
+          }
+          // t 校验（读密码是源包的 password 还是新包？校验的是新包，用 newPassword）
+          const testArgv = ['t', '-y'];
+          if (newPassword) testArgv.push(passwordArg(newPassword, settings.allowPassword));
+          testArgv.push(targetPath);
+          const tested = await run(testArgv);
+          if (tested.exitCode !== 0) {
+            return {
+              action, archive: archivePath, ok: false, exitCode: tested.exitCode,
+              summary: `Converted archive failed integrity test (code ${tested.exitCode}); target left in place: ${targetPath}`,
+              output: cleanOutput(decodeWith(tested.output, encoding), maxOutputChars).text, truncated: false,
+            };
+          }
+          let sourceDeleted = false;
+          if (args.deleteSource === true) {
+            try {
+              unlinkSync(archivePath);
+              sourceDeleted = true;
+            } catch (error) {
+              // Conversion succeeded; only deletion failed. Report honestly.
+              sourceDeleted = false;
+            }
+          }
+          return {
+            action, archive: archivePath, ok: true, exitCode: 0,
+            summary: `Converted ${path.basename(archivePath)} to ${path.basename(targetPath)} (${targetFormat}, level ${level})${newPassword ? ' [encrypted]' : ''}${sourceDeleted ? '; source deleted' : ''}`,
+            output: '', truncated: false, convertedTo: targetPath, mode: targetFormat,
+            size: statSync(targetPath).size, sourceDeleted,
+          };
+        } finally {
+          try {
+            rmSync(tempRoot, { recursive: true, force: true });
+          } catch {
+            // best effort cleanup
+          }
+        }
+      }
+
+      // ---------------------------------------------------------------- create
       if (action === 'create') {
-        const sources = Array.isArray(args.files) ? args.files.filter((item) => typeof item === 'string') : [];
-        if (sources.length === 0) throw new Error('create requires files: at least one file or folder to compress.');
-        // bz appends the format extension to a name without one (`x` → `x.zip`), so the
-        // overwrite guard and every later check must watch the name that lands on disk.
+        const mode = args.mode === 'append' ? 'append' : 'create';
         const format = detectFormat(
           archivePath,
           typeof args.format === 'string' ? args.format : undefined,
-          settings.fallbackFormat,
         );
         const artifactPath = ARCHIVE_EXTENSION.test(path.basename(archivePath))
           ? archivePath
           : `${archivePath}.${format}`;
         const existedBefore = existsSync(artifactPath);
-        // bz 的 `c` 会静默替换同名压缩包（help: "Create a new archive (or overwrite an existing file)"）。
-        // 两道闸门：① 配置层 allowArchiveOverwrite 关着时，显式参数也不放行 —— 这是“防手滑”
-        // 的总开关；② 配置放开后，仍需显式传 overwrite:"overwrite"，避免默认行为悄悄毁包。
-        // `defaultOverwrite` 是解压默认值，刻意不参与此判断。
-        if (existedBefore && settings.allowArchiveOverwrite === false) {
-          throw new Error(
-            `Archive already exists: ${artifactPath}. Replacing it is disabled by the plugin `
-              + 'configuration (allowArchiveOverwrite: false). Enable it on the plugin page, '
-              + 'or choose another archive name.',
-          );
+        // Item 5: append reuses bz's `a` command and skips the overwrite gate; fall back
+        // to create when the archive does not exist yet.
+        const effectiveMode = mode === 'append' && existedBefore ? 'append' : 'create';
+        let sources = Array.isArray(args.files) ? args.files.filter((item) => typeof item === 'string') : [];
+        // Item 4: include globs select from the given sources relative to the session cwd.
+        if (Array.isArray(args.include) && args.include.length > 0) {
+          const patterns = args.include.filter((item) => typeof item === 'string' && item !== '');
+          const regexes = patterns.map(compileGlob);
+          const expanded = [];
+          // Patterns are relative to the session working directory. Walk cwd so
+          // each candidate path is tested as written by the caller, and only
+          // descend into the directories the caller named as sources.
+          const sourceDirs = sources.map((source) => path.resolve(cwd, source));
+          // A directory is searchable when it is one of the named sources or lies
+          // inside one. Descend fully inside named sources; elsewhere walk only the
+          // path down to a named source so relPaths stay relative to cwd.
+          const searchable = (dir) => sourceDirs.some((s) => {
+            const rel = path.relative(s, dir);
+            return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+          });
+          const ancestorOfSource = (dir) => sourceDirs.some((s) => {
+            const rel = path.relative(dir, s);
+            return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+          });
+          const visitCwd = (dir) => {
+            let entries;
+            try {
+              entries = readdirSync(dir, { withFileTypes: true });
+            } catch {
+              return;
+            }
+            for (const entry of entries) {
+              const abs = path.join(dir, entry.name);
+              const relPath = path.relative(cwd, abs).split(path.sep).join('/');
+              if (settings.restrictToWorkspace) assertInsideWorkspace(abs, cwd, 'include match');
+              if (entry.isDirectory()) {
+                if (searchable(abs) || ancestorOfSource(abs)) visitCwd(abs);
+              } else if (searchable(dir) && regexes.some((re) => re.test(relPath))) {
+                expanded.push(abs);
+              }
+            }
+          };
+          visitCwd(cwd);
+          sources = [...new Set(expanded)];
+          if (sources.length === 0) {
+            throw new Error(`include matched no files (patterns: ${patterns.join(', ')}). Check the patterns; they are relative to the session working directory.`);
+          }
         }
-        if (existedBefore && args.overwrite !== 'overwrite') {
-          throw new Error(
-            `Archive already exists: ${artifactPath}. Pass overwrite:"overwrite" to replace it, `
-              + 'or choose another archive name.',
-          );
+        if (sources.length === 0) throw new Error('create requires files or an include pattern that matches files.');
+        if (effectiveMode === 'create') {
+          assertCreateOverwrite(artifactPath, existedBefore, args.overwrite, settings);
         }
         const beforeMtime = existedBefore ? modifiedAt(artifactPath) : undefined;
-        const level = parseLevel(args.level, settings.defaultLevel);
-        const argv = ['c', `-fmt:${format}`, `-l:${level}`, '-y'];
+        const level = parseLevel(args.level);
+        const isAppend = effectiveMode === 'append';
+        const argv = [isAppend ? 'a' : 'c'];
+        if (!isAppend) argv.push(`-fmt:${format}`);
+        argv.push(`-l:${level}`, '-y');
         // `-r-` alone does NOT stop a directory that is named explicitly from being
-        // walked: `bz c -r- out.zip proj` and `bz c -r out.zip proj` produce identical
-        // entries (verified against bz 7.47). The switch only constrains wildcard
-        // expansion, so `recursive:false` must pass "<dir>\*" to mean one level.
-        // Explicit `recursive` beats `defaultRecursive` beats the hard-coded true.
-        const shallow = (args.recursive ?? settings.defaultRecursive) === false;
+        // walked: bz's recursion switch only constrains wildcard expansion.
+        const shallow = args.recursive === false;
         argv.push(shallow ? '-r-' : '-r');
         if (password) argv.push(passwordArg(password, settings.allowPassword));
-        argv.push(archivePath);
+        argv.push(artifactPath);
         const skipped = [];
         for (const source of sources) {
           const absolute = path.resolve(cwd, source);
@@ -874,8 +1357,6 @@ export function apply(ctx, config) {
           const relative = path.relative(cwd, absolute);
           let entry = relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : absolute;
           if (shallow && info.isDirectory()) {
-            // `<dir>\\*` means one level, but an empty directory has nothing to expand and
-            // bz answers "No files to archive" (exit 2). Record it instead of failing the run.
             let empty = false;
             try {
               empty = readdirSync(absolute).length === 0;
@@ -888,8 +1369,7 @@ export function apply(ctx, config) {
             }
             entry = path.win32.join(entry, '*');
           }
-          // A name starting with "-" would be read as a switch (e.g. "-r"), and bz
-          // answers with "No files to archive". A "./" prefix keeps it a path.
+          // A name starting with "-" would be read as a switch; "./" keeps it a path.
           argv.push(entry.startsWith('-') ? `./${entry}` : entry);
         }
         if (sources.length > 0 && skipped.length === sources.length) {
@@ -899,14 +1379,15 @@ export function apply(ctx, config) {
           );
         }
         const result = await run(argv);
-        const decoded = cleanOutput(decode(result.output), maxOutputChars);
+        const decoded = cleanOutput(decodeWith(result.output, encoding), maxOutputChars);
         const produced = existsSync(artifactPath);
-        // An unreadable mtime cannot prove staleness; `produced` already proves the file exists.
         const fresh = produced
           && (!existedBefore || beforeMtime === undefined || modifiedAt(artifactPath) !== beforeMtime);
-        // bz 用退出码 1 表示"有 warning 但已完成"；只有确实写出了新文件才认这个成功，
-        // 退出码 2（例如 No files to archive）永远算失败。
-        const ok = result.exitCode === 0 ? produced : result.exitCode === 1 && fresh;
+        // bz 用退出码 1 表示"有 warning 但已完成"；append 没改 mtime 也可能 legitimately 成功，
+        // 所以 append 放宽到 exitCode 0/1 且文件存在。
+        const ok = isAppend
+          ? produced && (result.exitCode === 0 || result.exitCode === 1)
+          : (result.exitCode === 0 ? produced : result.exitCode === 1 && fresh);
         const warnings = ok ? warningsOf(decoded.text) : [];
         let size;
         if (ok) {
@@ -919,63 +1400,43 @@ export function apply(ctx, config) {
         const skippedNote = skipped.length === 0
           ? ''
           : `; skipped empty director${skipped.length === 1 ? 'y' : 'ies'} ${skipped.join(', ')}`;
-        // An opt-in self-check: the archive was produced, but a truncated or corrupt write
-        // would still exit 0. The create is NOT rolled back — the file is reported as made
-        // with a warning, so the caller keeps control of a possibly-usable artifact.
         let verifyNote = '';
         let verified;
-        if (ok && settings.verifyAfterCreate) {
+        if (ok && args.verify === true) {
           try {
             const checkArgv = ['t', '-y'];
             if (password) checkArgv.push(passwordArg(password, settings.allowPassword));
             checkArgv.push(artifactPath);
             const check = await run(checkArgv);
             verified = check.exitCode === 0;
-            if (!verified) {
-              verifyNote = `; 已创建但校验不通过（bz 退出码 ${check.exitCode}）`;
-            }
+            if (!verified) verifyNote = `; 已创建但校验不通过（bz 退出码 ${check.exitCode}）`;
           } catch (error) {
             verified = false;
             verifyNote = `; 已创建但校验无法完成（${error instanceof Error ? error.message : String(error)}）`;
           }
         }
-        let summary;
-        if (ok) {
-          summary = `Created ${path.basename(artifactPath)} (${format}${size === undefined ? '' : `, ${size} bytes`})`
+        const verb = isAppend ? 'Appended to' : 'Created';
+        const summary = ok
+          ? `${verb} ${path.basename(artifactPath)} (${format}${size === undefined ? '' : `, ${size} bytes`})`
+            + (isAppend ? ' [append]' : '')
             + (warnings.length === 0 ? '' : ` with ${warnings.length} warning(s)`)
-            + skippedNote
-            + verifyNote;
-        } else if (result.exitCode === 0) {
-          summary = `bz.exe exited with code 0 but did not create ${path.basename(artifactPath)}.`;
-        } else {
-          summary = `bz.exe exited with code ${result.exitCode}`;
-        }
+            + skippedNote + verifyNote
+          : `bz.exe exited with code ${result.exitCode}`;
         return {
-          action,
-          archive: archivePath,
-          ok,
-          exitCode: result.exitCode,
-          summary,
-          output: decoded.text,
-          truncated: decoded.truncated,
+          action, archive: archivePath, ok, exitCode: result.exitCode, summary,
+          output: decoded.text, truncated: decoded.truncated, mode: effectiveMode,
           ...(size === undefined ? {} : { size }),
         };
       }
 
-      // extract
+      // ---------------------------------------------------------------- extract
       if (!existsSync(archivePath)) throw new Error(`Archive not found: ${archivePath}`);
       const baseName = path.basename(archivePath);
       const stem = baseName.replace(ARCHIVE_EXTENSION, '');
-      // 剥不掉扩展名（.001、无扩展名）或整个名字就是扩展名时补后缀：默认目标绝不能与压缩包
-      // 同路径、也不能退化成父目录，否则 bz 会把它当目录用并直接报"系统找不到指定的路径"。
       const besideName = stem === baseName || stem === '' ? `${baseName} extracted` : stem;
-      // Explicit argument beats `defaultDestination` (`cwd` = session working directory,
-      // `beside` = a folder named after the archive next to it).
       const destinationPath = args.destination
         ? path.resolve(cwd, String(args.destination))
-        : settings.defaultDestination === 'cwd'
-          ? path.join(cwd, besideName)
-          : path.join(path.dirname(archivePath), besideName);
+        : path.join(path.dirname(archivePath), besideName);
       if (settings.restrictToWorkspace) assertInsideWorkspace(destinationPath, cwd, 'destination');
       if (destinationPath === archivePath) {
         throw new Error(`destination must not be the archive itself: ${archivePath}`);
@@ -989,34 +1450,138 @@ export function apply(ctx, config) {
         }
         if (!isDirectory) throw new Error(`destination already exists as a file: ${destinationPath}`);
       }
-      // Explicit argument beats the plugin's default beats the hard-coded fallback. `??`
-      // (not `||`) is required: an explicit `flat: false` must override `defaultFlat: true`.
-      const overwriteSwitch = OVERWRITE_SWITCH[args.overwrite ?? settings.defaultOverwrite]
-        ?? OVERWRITE_SWITCH.overwrite;
-      const argv = [(args.flat ?? settings.defaultFlat) === true ? 'e' : 'x', `-o:${destinationPath}`, overwriteSwitch, '-y'];
-      if (password) argv.push(passwordArg(password, settings.allowPassword));
-      argv.push(archivePath);
-      const result = await run(argv);
-      const decoded = cleanOutput(decode(result.output), maxOutputChars);
+      // List once on the untruncated text; every extract feature uses this.
+      const listing = await listArchive(run, archivePath, password, settings.allowPassword, encoding);
+      if (!listing.ok) {
+        return {
+          action, archive: archivePath, destination: destinationPath, ok: false,
+          exitCode: listing.exitCode, summary: `bz.exe failed to list archive with code ${listing.exitCode}`,
+          output: listing.text, truncated: false,
+        };
+      }
+      // Item 11: zip-slip check - reject the whole archive on an unsafe entry name.
+      const unsafe = listing.entries.find((e) => {
+        // Check the raw (slash-normalized) name too: normalizeEntryPath strips a
+        // leading "/", so an absolute entry such as "/etc/passwd" must be caught here.
+        const raw = String(e.name).replace(/\\/g, '/');
+        const name = normalizeEntryPath(e.name);
+        return name.includes('../') || raw.startsWith('/') || /^[A-Za-z]:/.test(raw);
+      });
+      if (unsafe) {
+        return {
+          action, archive: archivePath, destination: destinationPath, ok: false, exitCode: -1,
+          summary: `Refusing to extract: archive contains an unsafe entry "${unsafe.name}" (path traversal or absolute path).`,
+          output: '', truncated: false, rejected: true,
+        };
+      }
+      const includeMasks = Array.isArray(args.include)
+        ? args.include.filter((item) => typeof item === 'string' && item !== '')
+        : [];
+      const excludeMasks = Array.isArray(args.exclude)
+        ? args.exclude.filter((item) => typeof item === 'string' && item !== '')
+        : [];
+      const matchMask = (name, mask) => compileGlob(normalizeEntryPath(mask)).test(normalizeEntryPath(name));
+      const selectedFiles = listing.entries.filter((e) => {
+        if (e.isDir) return false;
+        if (includeMasks.length > 0 && !includeMasks.some((m) => matchMask(e.name, m))) return false;
+        if (excludeMasks.length > 0 && excludeMasks.some((m) => matchMask(e.name, m))) return false;
+        return true;
+      });
+      const overwriteSwitch = OVERWRITE_SWITCH[args.overwrite] ?? OVERWRITE_SWITCH.overwrite;
+      const overwriteMode = args.overwrite === undefined ? 'overwrite' : args.overwrite;
+
+      // Item 11: dryRun - no writes; report would-create/overwrite/skip and the
+      // first 20 conflicting paths.
+      if (args.dryRun === true) {
+        let wouldCreate = 0;
+        let wouldOverwrite = 0;
+        let wouldSkip = 0;
+        const conflicts = [];
+        for (const entry of selectedFiles) {
+          const target = path.join(destinationPath, ...entry.name.split('/').filter(Boolean));
+          if (existsSync(target)) {
+            if (overwriteMode === 'skip') wouldSkip += 1;
+            else { wouldOverwrite += 1; conflicts.push(target); }
+          } else {
+            wouldCreate += 1;
+          }
+        }
+        return {
+          action, archive: archivePath, destination: destinationPath, ok: true, exitCode: 0,
+          summary: `Dry run: ${selectedFiles.length} file(s) selected (wouldCreate ${wouldCreate}, wouldOverwrite ${wouldOverwrite}, wouldSkip ${wouldSkip}). No files were written.`,
+          output: '', truncated: false, wouldCreate, wouldOverwrite, wouldSkip,
+          conflicts: conflicts.slice(0, 20),
+        };
+      }
+
+      let result;
+      let usedOutput = '';
+      if (includeMasks.length > 0 && excludeMasks.length === 0) {
+        // Item 10: include can be handed straight to bz as backslash masks, with an
+        // explicit overwrite switch so bz never waits at an interactive prompt.
+        const argv = [args.flat === true ? 'e' : 'x', `-o:${destinationPath}`, overwriteSwitch, '-y'];
+        if (password) argv.push(passwordArg(password, settings.allowPassword));
+        argv.push(archivePath);
+        for (const mask of includeMasks) argv.push(normalizeEntryPath(mask).replace(/\//g, '\\'));
+        result = await run(argv);
+        usedOutput = decodeWith(result.output, encoding);
+      } else if (excludeMasks.length > 0 || includeMasks.length > 0) {
+        // Item 10: exclude is implemented by difference - extract selected files
+        // one by one with backslash masks (with the same overwrite switch).
+        const outputs = [];
+        let failed;
+        for (const entry of selectedFiles) {
+          const mask = entry.name.replace(/\//g, '\\');
+          const argv = [args.flat === true ? 'e' : 'x', `-o:${destinationPath}`, overwriteSwitch, '-y'];
+          if (password) argv.push(passwordArg(password, settings.allowPassword));
+          argv.push(archivePath, mask);
+          const one = await run(argv);
+          outputs.push(decodeWith(one.output, encoding));
+          if (one.exitCode !== 0 && failed === undefined) failed = one.exitCode;
+        }
+        result = { exitCode: failed ?? 0, output: Buffer.from(outputs.join('\n')) };
+        usedOutput = outputs.join('\n');
+      } else {
+        const argv = [args.flat === true ? 'e' : 'x', `-o:${destinationPath}`, overwriteSwitch, '-y'];
+        if (password) argv.push(passwordArg(password, settings.allowPassword));
+        argv.push(archivePath);
+        result = await run(argv);
+        usedOutput = decodeWith(result.output, encoding);
+      }
+      const decoded = cleanOutput(usedOutput, maxOutputChars);
       const ok = result.exitCode === 0;
-      // 统计口径是"压缩包里有多少条"：直接数目标目录会把解压前就存在的文件算进来，
-      // 在 overwrite:skip 下尤其误导。清单失败时才退回目录计数。
-      const counted = (await listEntryCount(run, archivePath, password, settings.allowPassword))
+      // 统计口径是"压缩包里有多少条"：直接数目标目录会把解压前就存在的文件算进来。
+      const counted = (await listEntryCount(run, archivePath, password, settings.allowPassword, encoding))
         ?? (existsSync(destinationPath) ? countFiles(destinationPath) : { files: 0, folders: 0 });
-      return {
-        action,
-        archive: archivePath,
-        destination: destinationPath,
-        ok,
-        exitCode: result.exitCode,
+      // Item 12: structured manifest of what actually landed (max 500 entries).
+      // When include/exclude masks are in play, selectedFiles - not the whole listing -
+      // is the truth of what was extracted.
+      const maxEntries = 500;
+      const files = selectedFiles;
+      const top = [...new Set(files.map((e) => normalizeEntryPath(e.name).split('/')[0]))].filter(Boolean);
+      const landedFiles = files.slice(0, maxEntries).map((e) => path.resolve(destinationPath, ...e.name.split('/').filter(Boolean)));
+      // The counts must describe what this call unpacked. With an include/exclude
+      // mask the archive-wide count is a lie: it names entries that were skipped.
+      const selectedFileCount = files.filter((e) => !e.isDir).length;
+      const selectedFolderCount = files.filter((e) => e.isDir).length;
+      const response = {
+        action, archive: archivePath, destination: destinationPath, ok, exitCode: result.exitCode,
         summary: ok
-          ? `Extracted into ${destinationPath} (${counted.files} files${counted.folders ? `, ${counted.folders} folders` : ''})`
+          ? `Extracted into ${destinationPath} (${selectedFileCount} files${selectedFolderCount ? `, ${selectedFolderCount} folders` : ''})`
           : `bz.exe exited with code ${result.exitCode}`,
-        output: decoded.text,
-        truncated: decoded.truncated,
-        files: counted.files,
-        folders: counted.folders,
+        output: decoded.text, truncated: decoded.truncated,
+        files: selectedFileCount, folders: selectedFolderCount,
+        entries: files.slice(0, maxEntries).map((e) => ({ name: e.name, size: e.size })),
+        entriesTruncated: files.length > maxEntries,
+        byExtension: byExtension(files),
+        nestedArchives: files.filter((e) => looksLikeArchive(e.name)).map((e) => e.name),
+        landedFiles,
       };
+      if (top.length === 1 && !files.some((e) => !normalizeEntryPath(e.name).includes('/'))) {
+        response.singleTopLevelDir = top[0];
+        response.summary += `; 可上提一层（顶层目录 ${top[0]}）`;
+      }
+      return response;
     },
   });
 }
