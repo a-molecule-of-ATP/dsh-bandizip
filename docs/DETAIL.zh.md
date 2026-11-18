@@ -19,6 +19,12 @@
 | `browse` | 按层浏览包内目录 | `path`、`depth` |
 | `convert` | 换格式 / 换级别 / 改密码 | `format`、`level`、`password`、`newPassword`、`deleteSource` |
 
+## 掩码怎么匹配
+
+`include` / `exclude` 的掩码是**相对包根的路径**，`*` 只代表一层。最坑的是三条都会返回成功——包括一条都没匹配到的那种：
+
+![三种掩码各自命中的条目](masks.svg)
+
 ## 典型用法
 
 只看包里有什么，不落地：

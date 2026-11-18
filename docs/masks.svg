@@ -1,0 +1,31 @@
+<svg width="1280" height="470" viewBox="0 0 1280 470" fill="none" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, 'Cascadia Mono', 'Courier New', monospace">
+  <!-- the archive being extracted -->
+  <rect x="60" y="96" width="330" height="288" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="84" y="136" font-size="15" fill="#8b93a7">inside the archive</text>
+  <text xml:space="preserve" x="84" y="182" font-size="18" fill="#dfe4ee">src/</text>
+  <text xml:space="preserve" x="84" y="218" font-size="18" fill="#dfe4ee">├─ a.txt</text>
+  <text xml:space="preserve" x="84" y="254" font-size="18" fill="#dfe4ee">└─ sub/</text>
+  <text xml:space="preserve" x="84" y="290" font-size="18" fill="#dfe4ee">   ├─ b.log</text>
+  <text xml:space="preserve" x="84" y="326" font-size="18" fill="#dfe4ee">   └─ c.txt</text>
+  <text x="84" y="362" font-size="13" fill="#6b7a99">masks are relative to the archive root</text>
+
+  <!-- three masks, verified against bz 7.47 -->
+  <rect x="440" y="96" width="780" height="84" rx="14" fill="#2a1a20" stroke="#5c3540" stroke-width="2" />
+  <text x="470" y="132" font-size="18" fill="#f0909f">*.txt</text>
+  <text x="470" y="158" font-size="13" fill="#b0808c">a bare mask matches the top level only</text>
+  <text x="1190" y="140" text-anchor="end" font-size="17" fill="#f0909f">0 files</text>
+
+  <rect x="440" y="196" width="780" height="84" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="470" y="232" font-size="18" fill="#dfe4ee">src\*.txt</text>
+  <text x="470" y="258" font-size="13" fill="#8b93a7">one level below src</text>
+  <text x="1190" y="240" text-anchor="end" font-size="17" fill="#7fdba8">1 file · src/a.txt</text>
+
+  <rect x="440" y="296" width="780" height="84" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="470" y="332" font-size="18" fill="#dfe4ee">src\sub\*</text>
+  <text x="470" y="358" font-size="13" fill="#8b93a7">name the folder you mean</text>
+  <text x="1190" y="340" text-anchor="end" font-size="17" fill="#7fdba8">2 files · src/sub/b.log, src/sub/c.txt</text>
+
+  <!-- the trap -->
+  <rect x="440" y="396" width="780" height="46" rx="23" fill="#1b2437" stroke="#2f4a6d" stroke-width="2" />
+  <text x="830" y="425" text-anchor="middle" font-size="14" fill="#a9c2e6">every case exits 0 — an empty mask still reports success</text>
+</svg>

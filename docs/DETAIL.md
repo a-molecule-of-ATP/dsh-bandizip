@@ -24,6 +24,14 @@ say what it wants.
 | `browse` | Walk the archive one level at a time | `path`, `depth` |
 | `convert` | Repack into another format, level or password | `format`, `level`, `password`, `newPassword`, `deleteSource` |
 
+## How masks match
+
+An `include` / `exclude` mask is a path relative to the archive root, and `*`
+covers exactly one level. All three cases below report success — including the
+one that matches nothing:
+
+![What each mask matches](masks.svg)
+
 ## Examples
 
 Inspect an archive without writing anything:
