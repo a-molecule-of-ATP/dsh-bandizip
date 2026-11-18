@@ -2,6 +2,11 @@
 
 一个让 DeepSeek Harness 智能体调用本机 Bandizip 控制台程序（`bz.exe`）来压缩、解压、查看、校验、预览、比较、浏览与转换压缩包的 DSH 插件。**只在本机干活，不联网。**
 
+> **术语说明**
+> - **参数**：智能体每次调用传的，写在工具 schema 里，如 `level`、`overwrite`、`include`、`timeoutSeconds`。
+> - **设置**：你在插件页配的，跨调用生效，多为限权或环境，如 `allowArchiveOverwrite`、`restrictToWorkspace`、`allowPassword`、`bzPath`、`timeoutSeconds`（作为上限）。
+> - **命令行开关**：`bz.exe` 自己的开关，如 `-aoa`、`-o:`、`-r-`，不要与前两者混称。
+
 ## 它提供什么
 
 它向智能体注册 **1 个工具 `bandizip`**，通过 `action` 参数完成 **8 种操作**（`create` / `extract` / `list` / `test` 是基本操作，`preview` / `diff` / `browse` / `convert` 是派生检查与重打包）：
@@ -15,7 +20,7 @@
 - `browse`：树状浏览压缩包内某一层目录，用 `path` 指定包内前缀、`depth`（默认 1）控制向下合并几层。
 - `convert`：把压缩包重打包成另一种格式 / 级别 / 密码；`format` 是目标格式、`password` 是读取源包用的密码、`newPassword` 是新包密码、`deleteSource:true` 在转换成功并校验后删除源包。
 
-所有行为开关都已在**每次调用**时按参数决定，不在插件里固化（默认：压缩级别 `level` 5、递归 `recursive` true、覆盖 `overwrite` overwrite、扁平化 `flat` false、`mode` create、`encoding` auto、目录浏览 `depth` 1、`offset` 0、解压目标为包旁同名目录）；每次调用还可用 `timeoutSeconds`（1–86400）覆盖配置的超时。工具是非交互式的：受密码保护的压缩包需显式传 `password`（关闭 `allowPassword` 后一律拒绝）。
+所有行为都由**每次调用的参数**决定，不在插件里固化（参数的缺省值：压缩级别 `level` 5、递归 `recursive` true、覆盖 `overwrite` overwrite、扁平化 `flat` false、`mode` create、`encoding` auto、目录浏览 `depth` 1、`offset` 0、解压目标为包旁同名目录）；每次调用还可用参数 `timeoutSeconds`（1–86400）覆盖设置的超时上限。工具是非交互式的：受密码保护的压缩包需显式传 `password`（关闭 `allowPassword` 后一律拒绝）。
 
 它带**设置页**，分组如下：总开关（启用/停用工具）、执行器（`bz.exe` 路径、超时、输出上限）、打包（是否允许覆盖同名压缩包）、安全（是否允许密码、是否限制在工作区内）。
 
@@ -41,9 +46,9 @@
 
 ## 配置项
 
-与 `index.js` 中的 `Config`（Schemastery schema）完全一致，共 7 项；全部为 `.volatile()`，保存后立即生效，无需重启插件。注意这些是**插件全局设置**，上面「它提供什么」里列出的 level / recursive / overwrite / flat 等**默认值都已是按次调用参数**，不在设置里固化：
+与 `index.js` 中的 `Config`（Schemastery schema）完全一致，共 7 项；全部为 `.volatile()`，保存后立即生效，无需重启插件。注意这些是**插件全局设置**，上面「它提供什么」里列出的 level / recursive / overwrite / flat 等行为的**缺省值都是按次调用的参数**，不在设置里固化：
 
-| 字段 | 类型 | 默认值 | 说明 |
+| 字段 | 类型 | 缺省值 | 说明 |
 |---|---|---|---|
 | `enabled` | boolean | `true` | 关闭后不注册 bandizip 工具；其余设置保留。 |
 | `bzPath` | string | `""` | `bz.exe` 完整路径；留空则自动探测标准 Bandizip 安装位置。 |
@@ -59,7 +64,7 @@
 - **vendored 依赖**：`node_modules/@deepseek-ai/schemastery` 与 `@deepseek-ai/cosmokit` 随包附带，并在 `package.json` 的 `files` 中声明。因此只能用 `link:` 安装；`npm pack` / 仓库安装会丢掉 `node_modules`，导致 `import Schema` 失败。升级 DSH 后若 schemastery 版本变化，需重新从新安装的 `app.asar` 里提取这两个包。
 - **密码不能含双引号 `"`**：`bz.exe` 会把内嵌双引号吃掉导致参数解析错误（已针对 bz 7.47 验证）。含 `"` 的密码会被直接拒绝。
 - **输出编码**：默认按 UTF-8 解码、乱码时回退 GBK；`list` / `extract` 可用按次参数 `encoding`（`auto` / `utf-8` / `gbk`）显式指定。
-- **`dryRun` 目前未进入工具参数 schema**：`extract` 的执行逻辑会读取 `args.dryRun` 并在工具宣传语里提到 dry-run，但当前 `parameters.properties` 并未声明该字段；由于工具设置了 `additionalProperties:false`，模型正常调用实际无法传入它。以工具当前声明的参数为准。
+- **`dryRun` 只作用于 `extract`**：它报告 `wouldCreate` / `wouldOverwrite` / `wouldSkip` 与前 20 条冲突，不写任何文件；顺带做 zip-slip 检查，条目里出现 `..`、绝对路径或盘符时整包拒绝。`create` 传它没有效果。
 - `convert` 的 `deleteSource` 只有在转换产物落盘并校验通过后才会删除源包，失败时忽略；`newPassword` 省略时新包不加密。
 - 受 Windows 命令行与进程限制，按次 `timeoutSeconds` 上限为 86400（超过会被 `setTimeout` 悄悄改成 1 ms，代码里也做了钳制）。
 
@@ -78,4 +83,4 @@ MIT © 2026 dafeiyu。详见 [LICENSE](LICENSE)。
 
 ---
 
-**English summary:** A DeepSeek Harness plugin that exposes one model tool, `bandizip`, to create, extract, list, test, preview, diff, browse, and convert archives through a locally installed Bandizip console executable (`bz.exe`). Eight actions are selected per call; all behaviour defaults (level 5, recursive, overwrite, flat, mode, encoding, destination) are per-call parameters rather than fixed settings. Seven volatile settings (including an overwrite gate and an allow-password switch) are editable in the bundled settings page. It is a local-only, link-installed bundle that vendors its Schemastery dependency. Licensed MIT.
+**English summary:** A DeepSeek Harness plugin that exposes one model tool, `bandizip`, to create, extract, list, test, preview, diff, browse, and convert archives through a locally installed Bandizip console executable (`bz.exe`). Eight actions are selected per call; all argument defaults (level 5, recursive, overwrite, flat, mode, encoding, destination) are per-call arguments rather than fixed in the plugin. Seven volatile settings (including an overwrite gate and an allow-password setting) are editable in the bundled settings page. It is a local-only, link-installed bundle that vendors its Schemastery dependency. Licensed MIT.

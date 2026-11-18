@@ -1,0 +1,31 @@
+<svg width="1280" height="470" viewBox="0 0 1280 470" fill="none" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, 'Microsoft YaHei', sans-serif">
+  <!-- 被解压的压缩包 -->
+  <rect x="60" y="96" width="330" height="288" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="84" y="136" font-size="15" fill="#8b93a7">压缩包内</text>
+  <text xml:space="preserve" x="84" y="182" font-size="18" fill="#dfe4ee">src/</text>
+  <text xml:space="preserve" x="84" y="218" font-size="18" fill="#dfe4ee">├─ a.txt</text>
+  <text xml:space="preserve" x="84" y="254" font-size="18" fill="#dfe4ee">└─ sub/</text>
+  <text xml:space="preserve" x="84" y="290" font-size="18" fill="#dfe4ee">   ├─ b.log</text>
+  <text xml:space="preserve" x="84" y="326" font-size="18" fill="#dfe4ee">   └─ c.txt</text>
+  <text x="84" y="362" font-size="13" fill="#6b7a99">掩码相对包根</text>
+
+  <!-- 三种掩码，均已对 bz 7.47 实测 -->
+  <rect x="440" y="96" width="780" height="84" rx="14" fill="#2a1a20" stroke="#5c3540" stroke-width="2" />
+  <text x="470" y="132" font-size="18" fill="#f0909f">*.txt</text>
+  <text x="470" y="158" font-size="13" fill="#b0808c">裸掩码只匹配第一层</text>
+  <text x="1190" y="140" text-anchor="end" font-size="17" fill="#f0909f">0 个文件</text>
+
+  <rect x="440" y="196" width="780" height="84" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="470" y="232" font-size="18" fill="#dfe4ee">src\*.txt</text>
+  <text x="470" y="258" font-size="13" fill="#8b93a7">src 的下一层</text>
+  <text x="1190" y="240" text-anchor="end" font-size="17" fill="#7fdba8">1 个文件 · src/a.txt</text>
+
+  <rect x="440" y="296" width="780" height="84" rx="14" fill="#1e2230" stroke="#2e3546" stroke-width="2" />
+  <text x="470" y="332" font-size="18" fill="#dfe4ee">src\sub\*</text>
+  <text x="470" y="358" font-size="13" fill="#8b93a7">要写全到具体目录</text>
+  <text x="1190" y="340" text-anchor="end" font-size="17" fill="#7fdba8">2 个文件 · src/sub/b.log, src/sub/c.txt</text>
+
+  <!-- 真正的坑 -->
+  <rect x="440" y="396" width="780" height="46" rx="23" fill="#1b2437" stroke="#2f4a6d" stroke-width="2" />
+  <text x="830" y="425" text-anchor="middle" font-size="14" fill="#a9c2e6">三种都返回成功——什么都没匹配到也算成功</text>
+</svg>

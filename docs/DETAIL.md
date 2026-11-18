@@ -2,13 +2,18 @@
 
 ![A stack of files zipped into an archive](preview.svg)
 
+> **Terminology**
+> - **Arguments** are passed by the agent on every call and declared in the tool schema, such as `level`, `overwrite`, `include`, and `timeoutSeconds`.
+> - **Settings** are configured by you on the plugin page and apply across calls, usually permissions or environment, such as `allowArchiveOverwrite`, `restrictToWorkspace`, `allowPassword`, `bzPath`, and `timeoutSeconds` (as a cap).
+> - **Command-line switches** belong to `bz.exe` itself, such as `-aoa`, `-o:`, and `-r-`; do not confuse them with the other two.
+
 ## What it solves
 
 An agent handling archives could compose a `bz.exe` command line itself, but the
-switches carry traps: `-o:` must precede the archive, `x` and `e` differ in
-whether the directory structure survives, a missing overwrite switch parks the
-process on an interactive prompt, and exit code 1 can mean either a warning or a
-failure. This plugin folds those details into one tool, so the agent only has to
+command-line switches carry traps: `-o:` must precede the archive, `x` and `e`
+differ in whether the directory structure survives, a missing overwrite
+command-line switch (`-ao*`) parks the process on an interactive prompt, and exit
+code 1 can mean either a warning or a failure. This plugin folds those details into one tool, so the agent only has to
 say what it wants.
 
 ## The eight actions
@@ -67,8 +72,15 @@ Compare two releases:
 
 ## Every behaviour is decided per call
 
-These are argument defaults, not plugin settings — pass another value when the
-task needs one:
+### Arguments versus settings
+
+The "Default" column below is the schema default an **argument** takes when the
+call omits it; the agent supplies or omits it on each call. **Settings**, by
+contrast, are configured by you on the plugin page and apply across calls
+(permissions and environment such as `allowArchiveOverwrite`,
+`restrictToWorkspace`, `allowPassword`, and `bzPath`). Changing an argument
+affects only that call; changing a setting affects every later call. Pass another
+value when the task needs one:
 
 | Argument | Default |
 |---|---|
@@ -79,7 +91,7 @@ task needs one:
 | `destination` | a folder beside the archive, named after it |
 | `mode` | `create` |
 | `encoding` | `auto` (fall back from UTF-8 to GBK) |
-| `timeoutSeconds` | the configured value, 900 by default |
+| `timeoutSeconds` | this is an **argument**: it defaults to the `timeoutSeconds` setting (schema default 900 s); a per-call value takes priority |
 
 ## Safety and boundaries
 
