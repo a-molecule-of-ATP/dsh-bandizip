@@ -28,13 +28,13 @@ git push -u origin main
 若仓库已有 tag 或需要指定首次提交，可按需调整提交信息；发布 tag：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 ## 建议的 tag 名
 
-- `v1.0.0`（与 `package.json` 的 `version` 一致）
+- `v0.1.0`（与 `package.json` 的 `version` 一致）
 
 ## 发布后核对
 
