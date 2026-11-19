@@ -11,8 +11,8 @@
 
 ## 发布前要改的占位符
 
-- `package.json` 的 `repository.url` / `bugs.url` / `homepage` 目前指向 `https://github.com/dafeiyu/dsh-bandizip.git`，确认 GitHub 用户名 `dafeiyu` 与仓库名无误；若实际账号不同，全局替换 `dafeiyu/dsh-bandizip`。
-- `LICENSE` 的版权行为 `Copyright (c) 2026 dafeiyu`，确认年份与署名。
+- `package.json` 的 `repository.url` / `bugs.url` / `homepage` 目前指向 `https://github.com/a-molecule-of-ATP/dsh-bandizip.git`，确认 GitHub 用户名 `a-molecule-of-ATP` 与仓库名无误；若实际账号不同，全局替换 `a-molecule-of-ATP/dsh-bandizip`。
+- `LICENSE` 的版权行为 `Copyright (c) 2026 a-molecule-of-ATP`，确认年份与署名。
 - `README.md` 安装段落里的 `name: '@local/bandizip'` 与 `package.json` 的 `name` 必须一致（当前一致）。
 - 确认 `node_modules/@deepseek-ai/schemastery` 与 `node_modules/@deepseek-ai/cosmokit` 两个 vendored 目录已随仓库提交且未被 `.gitignore` 排除——这是本插件能用设置页的前提。
 
@@ -21,7 +21,7 @@
 ```bash
 cd bandizip-plugin
 git add -A && git commit -m "chore: prepare dsh-bandizip for GitHub release"
-git remote add origin https://github.com/dafeiyu/dsh-bandizip.git
+git remote add origin https://github.com/a-molecule-of-ATP/dsh-bandizip.git
 git push -u origin main
 ```
 

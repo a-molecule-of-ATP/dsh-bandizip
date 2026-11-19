@@ -354,6 +354,33 @@ function normalizeEntryPath(raw) {
   return String(raw).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
 }
 
+/**
+ * Normalise a bz `-v:` volume size.
+ *
+ * bz accepts a plain byte count or a `k`/`m`/`g`/`t` suffix (`-v:100MB`,
+ * `-v:1440k`). We do not compute anything here — only reject a value that would
+ * reach the command line as something bz cannot mean, because a stray `-` there
+ * would be read as the next switch.
+ *
+ * @param raw - user-supplied size.
+ * @returns the normalised token, or `undefined` when the argument is absent.
+ */
+function parseVolumeSize(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    throw new Error('volumeSize must be a string such as "100MB" or a number of bytes.');
+  }
+  const text = String(raw).trim();
+  if (text === '' || text.startsWith('-')) throw new Error(`Invalid volumeSize: ${text}`);
+  const match = /^(\d+(?:\.\d+)?)\s*([kmgt]?b?)$/i.exec(text);
+  if (!match || Number(match[1]) <= 0) {
+    throw new Error(`Invalid volumeSize "${text}" — use bytes or a size like 100MB, 1440k, 2GB.`);
+  }
+  const value = Number(match[1]);
+  const unit = match[2].toUpperCase().replace(/B$/, '');
+  return unit === '' ? String(Math.round(value)) : `${value}${unit}`;
+}
+
 const ZIP_SIG_EOCD = 0x06054b50;
 const ZIP_SIG_CENTRAL = 0x02014b50;
 const ZIP_S_IFMT = 0xf000;
@@ -905,6 +932,12 @@ export function apply(ctx, config) {
             + 'bz\'s "a" command to add to an existing archive without the overwrite gate. If the '
             + 'archive does not exist, append falls back to create. Default create.',
         },
+        volumeSize: {
+          type: 'string',
+          description: 'create / append only: split the output into parts of this size (bz -v:), '
+            + 'for example "100MB" or "1440k". Bytes are also accepted ("104857600"). '
+            + 'The first part keeps the requested name and the rest are numbered by bz.',
+        },
         overwrite: {
           type: 'string',
           enum: ['overwrite', 'skip', 'rename'],
@@ -1427,7 +1460,12 @@ export function apply(ctx, config) {
         const isAppend = effectiveMode === 'append';
         const argv = [isAppend ? 'a' : 'c'];
         if (!isAppend) argv.push(`-fmt:${format}`);
-        argv.push(`-l:${level}`, '-y');
+        argv.push(`-l:${level}`);
+        // A volume size splits the output into parts; only `create` and `append`
+        // take it (bz ignores it for extraction).
+        const volumeSize = parseVolumeSize(args.volumeSize);
+        if (volumeSize !== undefined) argv.push(`-v:${volumeSize}`);
+        argv.push('-y');
         // `-r-` alone does NOT stop a directory that is named explicitly from being
         // walked: bz's recursion switch only constrains wildcard expansion.
         const shallow = args.recursive === false;
@@ -1491,6 +1529,24 @@ export function apply(ctx, config) {
             size = undefined;
           }
         }
+        // A split archive's size lives in its parts: the `.zip` alone is the last
+        // fragment, so reporting only that would claim a 6 KB archive is 212 bytes.
+        let volumeNote = '';
+        if (ok && volumeSize !== undefined) {
+          try {
+            const dir = path.dirname(artifactPath);
+            const stem = path.basename(artifactPath, path.extname(artifactPath));
+            const parts = readdirSync(dir)
+              .filter((name) => name.startsWith(`${stem}.z`) || name === path.basename(artifactPath))
+              .map((name) => ({ name, size: statSync(path.join(dir, name)).size }));
+            if (parts.length > 1) {
+              const total = parts.reduce((sum, part) => sum + part.size, 0);
+              volumeNote = `; split into ${parts.length} parts, ${total} bytes total`;
+            }
+          } catch {
+            // A reported size is a convenience; never fail the create over it.
+          }
+        }
         const skippedNote = skipped.length === 0
           ? ''
           : `; skipped empty director${skipped.length === 1 ? 'y' : 'ies'} ${skipped.join(', ')}`;
@@ -1511,7 +1567,7 @@ export function apply(ctx, config) {
         }
         const verb = isAppend ? 'Appended to' : 'Created';
         const summary = ok
-          ? `${verb} ${path.basename(artifactPath)} (${format}${size === undefined ? '' : `, ${size} bytes`})`
+          ? `${verb} ${path.basename(artifactPath)} (${format}${size === undefined ? '' : `, ${size} bytes`})${volumeNote}`
             + (isAppend ? ' [append]' : '')
             + (warnings.length === 0 ? '' : ` with ${warnings.length} warning(s)`)
             + skippedNote + verifyNote

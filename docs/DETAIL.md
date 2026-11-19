@@ -90,6 +90,7 @@ value when the task needs one:
 | `overwrite` | `overwrite` (replace same-named files on extract) |
 | `flat` | `false` (keep the directory structure) |
 | `destination` | a folder beside the archive, named after it |
+| `volumeSize` | none (no splitting) |
 | `mode` | `create` |
 | `encoding` | `auto` (fall back from UTF-8 to GBK) |
 | `timeoutSeconds` | this is an **argument**: it defaults to the `timeoutSeconds` setting (schema default 900 s); a per-call value takes priority |

@@ -14,15 +14,15 @@
     "7z"
   ],
   "license": "MIT",
-  "author": "dafeiyu",
+  "author": "a-molecule-of-ATP",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dafeiyu/dsh-bandizip.git"
+    "url": "https://github.com/a-molecule-of-ATP/dsh-bandizip.git"
   },
   "bugs": {
-    "url": "https://github.com/dafeiyu/dsh-bandizip/issues"
+    "url": "https://github.com/a-molecule-of-ATP/dsh-bandizip/issues"
   },
-  "homepage": "https://github.com/dafeiyu/dsh-bandizip#readme",
+  "homepage": "https://github.com/a-molecule-of-ATP/dsh-bandizip#readme",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",

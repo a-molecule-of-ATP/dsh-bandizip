@@ -11,7 +11,7 @@
 
 它向智能体注册 **1 个工具 `bandizip`**，通过 `action` 参数完成 **8 种操作**（`create` / `extract` / `list` / `test` 是基本操作，`preview` / `diff` / `browse` / `convert` 是派生检查与重打包）：
 
-- `create`：把文件/文件夹压缩成新压缩包（支持 zip、zipx、7z、tar、tgz、gz、xz、iso、lzh、自解压 exe；`rar` 等格式可读取但由解压/列举间接支持）。可用 `format` 指定格式、`level`（0–9，默认 5）指定级别、`include` 通配筛选要加入的路径、`mode:append` 追加到已有包、`verify` 生成后做完整性校验。
+- `create`：把文件/文件夹压缩成新压缩包（支持 zip、zipx、7z、tar、tgz、gz、xz、iso、lzh、自解压 exe；`rar` 等格式可读取但由解压/列举间接支持）。可用 `format` 指定格式、`level`（0–9，默认 5）指定级别、`include` 通配筛选要加入的路径、`mode:append` 追加到已有包、`volumeSize` 分卷（如 `"100MB"` 或 `"1440k"`，输出被拆成 `xxx.z01`、`xxx.z02`… 加最后一个 `.zip`，摘要会报告总 part 数与总字节数）、`verify` 生成后做完整性校验。
 - `extract`：把压缩包解压到指定目录（默认解到压缩包同名文件夹）。支持 `include` / `exclude` 掩码筛选条目、`flat` 扁平化、`overwrite` 覆盖策略、`encoding` 解码；**写盘之前**先过三道检查——zip-slip 路径穿越、压缩炸弹上限（设置 `maxExtractBytes`）、符号链接条目（设置 `rejectSymlinkEntries`），任何一道不过就整包拒绝；执行逻辑还支持 `dryRun` 预演（只报告 wouldCreate / wouldOverwrite / wouldSkip 与冲突，不写文件，见「已知限制」）。
 - `list`：列出压缩包内的条目，可按文字过滤（`filter`），并用 `limit` / `offset` 分页、`encoding` 指定解码。
 - `test`：校验压缩包完整性与密码。
@@ -24,6 +24,7 @@
 
 它带**设置页**，分组如下：总开关（启用/停用工具）、执行器（`bz.exe` 路径、超时、输出上限）、打包（是否允许覆盖同名压缩包）、安全（是否允许密码、是否限制在工作区内、是否拒绝符号链接条目、压缩炸弹上限）。
 
+- `volumeSize`（create / append）：分卷大小，`"100MB"`、`"1440k"` 或纯字节数。输出会拆成 `xxx.z01`、`xxx.z02`… 与最后一个 `.zip`；只报 `.zip` 的尺寸会误导，所以摘要里额外给出 part 数与合计字节数。非法值（负号、无法识别的单位）直接报错。
 ## 安装（本地 bundle）
 
 本插件以 `link:` 方式装进你的 profile（vendored 依赖必须随目录链接，见下方「已知限制」）。插件包自带的 `cordis.patch.yml` 内容为：
@@ -98,7 +99,7 @@
 
 ## License
 
-MIT © 2026 dafeiyu。详见 [LICENSE](LICENSE)。
+MIT © 2026 a-molecule-of-ATP。详见 [LICENSE](LICENSE)。
 
 ---
 

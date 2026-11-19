@@ -75,6 +75,7 @@
 | `overwrite` | `overwrite`（解压时替换同名文件） |
 | `flat` | `false`（保留目录结构） |
 | `destination` | 压缩包旁边的同名文件夹 |
+| `volumeSize` | 无（不分卷） |
 | `mode` | `create` |
 | `encoding` | `auto`（UTF-8 失败回退 GBK） |
 | `timeoutSeconds` | 这是**参数**：缺省取设置里的 `timeoutSeconds`（缺省值 900 秒）；本次调用传入时优先 |
