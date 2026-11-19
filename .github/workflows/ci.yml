@@ -2,7 +2,6 @@ name: ci
 
 on:
   push:
-分支: [main]
   pull_request:
 
 jobs:
