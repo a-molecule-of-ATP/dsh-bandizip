@@ -35,9 +35,7 @@
     "cordis.patch.yml",
     "locale/*.json",
     "docs",
-    "icon.svg",
-    "node_modules/@deepseek-ai/schemastery",
-    "node_modules/@deepseek-ai/cosmokit"
+    "icon.svg"
   ],
   "dsh": {
     "bundle": {
@@ -52,5 +50,13 @@
         "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
-  }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/cosmokit": "*"
+  },
+  "bundledDependencies": [
+    "@deepseek-ai/schemastery",
+    "@deepseek-ai/cosmokit"
+  ]
 }
