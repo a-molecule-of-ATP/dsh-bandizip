@@ -267,6 +267,14 @@ window.__ModuleLoader__.load({
               '拒绝工作区之外的 archive / files / destination。注意：开启后会挡掉工作区外的合法跨盘操作，只在需要强边界时启用。',
               draft.restrictToWorkspace === true,
               (value) => update({ restrictToWorkspace: value })),
+            switchField('symlink', '拒绝含符号链接的压缩包',
+              '解压前读 ZIP 中央目录的属性位，发现符号链接条目就整包拒绝——符号链接能把后续写入带到目标目录之外。'
+              + '只有 zip / zipx 能检查，7z / tar 不受此限制。',
+              draft.rejectSymlinkEntries !== false,
+              (value) => update({ rejectSymlinkEntries: value })),
+            textField('压缩炸弹上限（字节）', '解压前把各条目声明的解压后大小相加，超过就拒绝整包。0 表示不检查。',
+              num(draft.maxExtractBytes, 0), (value) => updateNumber('maxExtractBytes', value),
+              { input: { type: 'number', min: 0, step: 1048576 } }),
           ]),
         ]),
 

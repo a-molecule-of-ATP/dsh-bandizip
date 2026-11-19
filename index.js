@@ -46,6 +46,12 @@ export const Config = Schema.object({
     .description('是否允许把密码交给 bz.exe。关闭后任何带 password 的调用都会失败；密码以 argv 传递，本机其它进程可见。'),
   restrictToWorkspace: Schema.boolean().default(false).volatile()
     .description('拒绝工作区之外的 archive / files / destination。开启后会挡掉工作区外的合法跨盘操作，只在需要强边界时启用。'),
+  maxExtractBytes: Schema.natural().default(0).volatile()
+    .description('解压前的压缩炸弹上限：把所有条目声明的解压后大小相加，超过该字节数就拒绝整包。0 = 不检查。'
+      + '它读的是压缩包自己声明的尺寸，异常包也可能谎报，所以它是防线之一而不是唯一防线。'),
+  rejectSymlinkEntries: Schema.boolean().default(true).volatile()
+    .description('解压前拒绝含符号链接条目的压缩包。符号链接可以把后续写入带到目标目录之外。'
+      + '只有 zip / zipx 能检查（读中央目录的属性位）；7z / tar 等格式不做此检查，此时该项不起作用。'),
 });
 
 const TOOL_NAME = 'bandizip';
@@ -225,6 +231,8 @@ function readRowConfig(ctx, fallback) {
     allowArchiveOverwrite: fallback?.allowArchiveOverwrite === true,
     allowPassword: fallback?.allowPassword !== false,
     restrictToWorkspace: fallback?.restrictToWorkspace === true,
+    maxExtractBytes: Number.isSafeInteger(fallback?.maxExtractBytes) && fallback.maxExtractBytes > 0 ? fallback.maxExtractBytes : 0,
+    rejectSymlinkEntries: fallback?.rejectSymlinkEntries !== false,
   };
   try {
     const entry = ctx.configEditor.entries()
@@ -237,6 +245,13 @@ function readRowConfig(ctx, fallback) {
     if (values?.allowArchiveOverwrite !== undefined) merged.allowArchiveOverwrite = values.allowArchiveOverwrite === true;
     if (values?.allowPassword !== undefined) merged.allowPassword = values.allowPassword !== false;
     if (values?.restrictToWorkspace !== undefined) merged.restrictToWorkspace = values.restrictToWorkspace === true;
+    if (values?.maxExtractBytes !== undefined) {
+      const bytes = Number(values.maxExtractBytes);
+      merged.maxExtractBytes = Number.isSafeInteger(bytes) && bytes > 0 ? bytes : 0;
+    }
+    if (values?.rejectSymlinkEntries !== undefined) {
+      merged.rejectSymlinkEntries = values.rejectSymlinkEntries !== false;
+    }
   } catch {
     // No reachable profile row: keep the activation config.
   }
@@ -337,6 +352,62 @@ function parseListing(text) {
 /** 统一路径为正斜杠、相对包根，去掉开头的 "./"。 */
 function normalizeEntryPath(raw) {
   return String(raw).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+const ZIP_SIG_EOCD = 0x06054b50;
+const ZIP_SIG_CENTRAL = 0x02014b50;
+const ZIP_S_IFMT = 0xf000;
+const ZIP_S_IFLNK = 0xa000;
+
+/**
+ * Names of the symlink entries in a ZIP/ZIPX archive.
+ *
+ * `bz l` cannot answer this: its Attr column carries only the directory flag and
+ * the DOS archive bit, so a symlink entry prints exactly like a regular file. The
+ * Unix mode does survive in the central directory (high 16 bits of the external
+ * attributes), which is the one place the entry type is recorded.
+ *
+ * Returns `{ checked: false, reason }` when the file is not a ZIP, is ZIP64, or is
+ * malformed — callers must not read "could not check" as "clean".
+ *
+ * @param filePath - archive on disk.
+ */
+function zipSymlinkEntries(filePath) {
+  let buffer;
+  try {
+    buffer = readFileSync(filePath);
+  } catch (error) {
+    return { checked: false, reason: `cannot read archive: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  // End of central directory: 22 bytes plus up to 64 KiB of trailing comment.
+  const floor = Math.max(0, buffer.length - 0xffff - 22);
+  let eocd = -1;
+  for (let i = buffer.length - 22; i >= floor; i -= 1) {
+    if (buffer.readUInt32LE(i) === ZIP_SIG_EOCD) { eocd = i; break; }
+  }
+  if (eocd < 0) return { checked: false, reason: 'not a zip archive (no end-of-central-directory record)' };
+
+  const count = buffer.readUInt16LE(eocd + 10);
+  const cdOffset = buffer.readUInt32LE(eocd + 16);
+  if (count === 0xffff || cdOffset === 0xffffffff) {
+    return { checked: false, reason: 'zip64 central directory is not scanned' };
+  }
+
+  const symlinks = [];
+  let p = cdOffset;
+  for (let n = 0; n < count; n += 1) {
+    if (p + 46 > buffer.length || buffer.readUInt32LE(p) !== ZIP_SIG_CENTRAL) {
+      return { checked: false, reason: `central directory malformed at entry ${n + 1}` };
+    }
+    const nameLength = buffer.readUInt16LE(p + 28);
+    const extraLength = buffer.readUInt16LE(p + 30);
+    const commentLength = buffer.readUInt16LE(p + 32);
+    const externalAttributes = buffer.readUInt32LE(p + 38);
+    const name = buffer.toString('utf8', p + 46, p + 46 + nameLength);
+    if (((externalAttributes >>> 16) & ZIP_S_IFMT) === ZIP_S_IFLNK) symlinks.push(name);
+    p += 46 + nameLength + extraLength + commentLength;
+  }
+  return { checked: true, symlinks, entryCount: count };
 }
 
 /** 把通配模式（* 与 **）编译成 RegExp；* 不跨 /，** 跨 /。 */
@@ -729,7 +800,8 @@ export function apply(ctx, config) {
       + 'reading rar and other formats is supported by extraction and listing. '
       + 'Relative paths resolve against the session working directory. '
       + 'Actions: create (compress files/folders, with optional append mode and glob include), '
-      + 'extract (unpack into a directory, with include/exclude masks, dry-run and zip-slip checks), '
+      + 'extract (unpack into a directory, with include/exclude masks, dry-run, and pre-extraction guards: '
+      + 'zip-slip, compressed-bomb ceiling and symlink entries), '
       + 'list (show contents, with pagination), test (verify integrity and passwords), '
       + 'preview (inspect contents without extracting, with size/extension statistics), '
       + 'diff (compare two archives by entry size), browse (tree-browser of one folder level), '
@@ -1495,6 +1567,38 @@ export function apply(ctx, config) {
           summary: `Refusing to extract: archive contains an unsafe entry "${unsafe.name}" (path traversal or absolute path).`,
           output: '', truncated: false, rejected: true,
         };
+      }
+      // Compressed-bomb ceiling. These sizes come from the archive's own headers, so
+      // an archive can understate them: this is a cheap early stop, not proof.
+      const maxExtractBytes = Number(settings.maxExtractBytes) > 0 ? Number(settings.maxExtractBytes) : 0;
+      if (maxExtractBytes > 0) {
+        const declaredBytes = listing.entries.reduce(
+          (sum, entry) => sum + (Number.isFinite(entry.size) && entry.size > 0 ? entry.size : 0), 0,
+        );
+        if (declaredBytes > maxExtractBytes) {
+          return {
+            action, archive: archivePath, destination: destinationPath, ok: false, exitCode: -1,
+            summary: `Refusing to extract: entries declare ${declaredBytes} bytes, over the ${maxExtractBytes}-byte `
+              + 'maxExtractBytes ceiling. Raise that setting if the archive is legitimate.',
+            output: '', truncated: false, rejected: true,
+          };
+        }
+      }
+      // Symlink entries. Only a ZIP records the entry type (in its central
+      // directory), so other formats — and ZIP64, which this scan skips — are simply
+      // not covered here; that is documented rather than silently assumed clean.
+      if (settings.rejectSymlinkEntries !== false) {
+        const symlinkScan = zipSymlinkEntries(archivePath);
+        if (symlinkScan.checked && symlinkScan.symlinks.length > 0) {
+          const shown = symlinkScan.symlinks.slice(0, 5).map((name) => `"${name}"`).join(', ');
+          return {
+            action, archive: archivePath, destination: destinationPath, ok: false, exitCode: -1,
+            summary: `Refusing to extract: archive contains symlink entries (${shown}`
+              + `${symlinkScan.symlinks.length > 5 ? ', …' : ''}). A symlink can redirect later writes outside the `
+              + 'destination. Turn off rejectSymlinkEntries only if you trust this archive.',
+            output: '', truncated: false, rejected: true,
+          };
+        }
       }
       const includeMasks = Array.isArray(args.include)
         ? args.include.filter((item) => typeof item === 'string' && item !== '')
