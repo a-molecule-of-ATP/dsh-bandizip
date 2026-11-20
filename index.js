@@ -8,9 +8,10 @@
  * for an interactive prompt.
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
-  closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync,
-  renameSync, rmSync, statSync, unlinkSync,
+  closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync,
+  readFileSync, renameSync, rmSync, statSync, unlinkSync,
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -379,6 +380,49 @@ function parseVolumeSize(raw) {
   const value = Number(match[1]);
   const unit = match[2].toUpperCase().replace(/B$/, '');
   return unit === '' ? String(Math.round(value)) : `${value}${unit}`;
+}
+
+/**
+ * Stream one file through a digest, so a large archive never has to be held in
+ * memory. Same shape as the helper the download plugin uses.
+ *
+ * @param filePath - file to hash.
+ * @param algorithm - node:crypto algorithm name.
+ * @returns hex digest.
+ */
+async function hashFile(filePath, algorithm) {
+  const hash = createHash(algorithm);
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
+/**
+ * Walk a directory and return `relative/path -> { size, sha256 }` for every
+ * regular file, so a packed tree can be compared against what comes back out.
+ *
+ * @param root - directory to walk.
+ * @returns map of relative path to its size and digest.
+ */
+async function digestTree(root) {
+  const out = new Map();
+  const walk = async (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = path.join(dir, entry.name);
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        await walk(absolute, relative);
+      } else if (entry.isFile()) {
+        out.set(relative, { size: statSync(absolute).size, sha256: await hashFile(absolute, 'sha256') });
+      }
+    }
+  };
+  await walk(root, '');
+  return out;
 }
 
 const ZIP_SIG_EOCD = 0x06054b50;
@@ -960,10 +1004,13 @@ export function apply(ctx, config) {
             + 'Omit it to keep the archive structure (the default).',
         },
         verify: {
-          type: 'boolean',
+          oneOf: [{ type: 'boolean' }, { type: 'string', const: 'roundtrip' }],
           description:
-            'create only: run a full integrity check on the new archive before reporting success. '
-            + 'Costs one extra bz round trip; a failed check is reported but does not delete the file.',
+            'create only: check the new archive before reporting success. `true` runs a full `bz t` '
+            + 'integrity check. `"roundtrip"` does that plus extracts the archive to a temporary folder '
+            + 'and compares every source file against what came back out (size and SHA-256) — proof that '
+            + 'what was packed is what unpacks, not merely that the container is intact. A failed check is '
+            + 'reported and never deletes the archive.',
         },
         dryRun: {
           type: 'boolean',
@@ -1029,6 +1076,27 @@ export function apply(ctx, config) {
           files: { type: 'integer' },
           folders: { type: 'integer' },
           size: { type: 'integer' },
+          verified: { type: 'boolean' },
+          digest: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { algorithm: { type: 'string' }, hex: { type: 'string' } },
+            required: ['algorithm', 'hex'],
+          },
+          roundtrip: {
+            type: 'object',
+            // `additionalProperties` does NOT inherit, so this has to be stated
+            // here as well; every field a failed comparison can carry is declared.
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean' },
+              checkedFiles: { type: 'integer' },
+              missing: { type: 'array', items: { type: 'string' } },
+              differing: { type: 'array', items: { type: 'string' } },
+              reason: { type: 'string' },
+            },
+            required: ['ok'],
+          },
           total: { type: 'integer' },
           nextOffset: { type: 'integer' },
           offset: { type: 'integer' },
@@ -1063,7 +1131,22 @@ export function apply(ctx, config) {
       },
       render: (_args, value) => {
         const text = value && typeof value === 'object' ? value : {};
-        const body = [text.summary, text.output].filter((part) => typeof part === 'string' && part !== '').join('\n\n');
+        const lines = [text.summary];
+        // The verification result is the point of asking for it, so it is shown
+        // rather than left inside the structured payload.
+        if (text.digest && typeof text.digest.hex === 'string') {
+          lines.push(`摘要：${text.digest.algorithm}:${text.digest.hex}`);
+        }
+        if (text.roundtrip && typeof text.roundtrip === 'object') {
+          const rt = text.roundtrip;
+          lines.push(rt.ok
+            ? `往返核对：通过（${rt.checkedFiles ?? 0} 个文件，内容一致）`
+            : `往返核对：不通过${rt.reason === undefined ? '' : `（${rt.reason}）`}`
+              + `${Array.isArray(rt.missing) && rt.missing.length > 0 ? `；缺失 ${rt.missing.length} 个` : ''}`
+              + `${Array.isArray(rt.differing) && rt.differing.length > 0 ? `；内容不同 ${rt.differing.length} 个` : ''}`);
+        }
+        const body = [...lines, text.output]
+          .filter((part) => typeof part === 'string' && part !== '').join('\n\n');
         return [{ type: 'text', text: body || 'bandizip: no output' }];
       },
     },
@@ -1394,6 +1477,13 @@ export function apply(ctx, config) {
 
       // ---------------------------------------------------------------- create
       if (action === 'create') {
+        // The host does not validate arguments against `parameters` on this
+        // path, so an out-of-contract value would be silently ignored. Refuse it
+        // here instead of pretending the call meant something it did not.
+        if (args.verify !== undefined && args.verify !== true && args.verify !== false
+          && args.verify !== 'roundtrip') {
+          throw new Error(`verify must be true, false, or "roundtrip"; got ${JSON.stringify(args.verify)}.`);
+        }
         const mode = args.mode === 'append' ? 'append' : 'create';
         const format = detectFormat(
           archivePath,
@@ -1473,6 +1563,10 @@ export function apply(ctx, config) {
         if (password) argv.push(passwordArg(password, settings.allowPassword));
         argv.push(artifactPath);
         const skipped = [];
+        // What each source is actually queued as. Roundtrip reuses this instead
+        // of re-deriving names a second way: the two derivations disagreed for
+        // absolute sources, and a correct archive was reported as missing files.
+        const queued = [];
         for (const source of sources) {
           const absolute = path.resolve(cwd, source);
           if (settings.restrictToWorkspace) assertInsideWorkspace(absolute, cwd, `files[] entry "${source}"`);
@@ -1503,6 +1597,7 @@ export function apply(ctx, config) {
           }
           // A name starting with "-" would be read as a switch; "./" keeps it a path.
           argv.push(entry.startsWith('-') ? `./${entry}` : entry);
+          queued.push({ entry, absolute, isDirectory: info.isDirectory() });
         }
         if (sources.length > 0 && skipped.length === sources.length) {
           throw new Error(
@@ -1552,7 +1647,9 @@ export function apply(ctx, config) {
           : `; skipped empty director${skipped.length === 1 ? 'y' : 'ies'} ${skipped.join(', ')}`;
         let verifyNote = '';
         let verified;
-        if (ok && args.verify === true) {
+        let roundtrip;
+        let digest;
+        if (ok && (args.verify === true || args.verify === 'roundtrip')) {
           try {
             const checkArgv = ['t', '-y'];
             if (password) checkArgv.push(passwordArg(password, settings.allowPassword));
@@ -1563,6 +1660,89 @@ export function apply(ctx, config) {
           } catch (error) {
             verified = false;
             verifyNote = `; 已创建但校验无法完成（${error instanceof Error ? error.message : String(error)}）`;
+          }
+        }
+        // The digest identifies the artifact that was produced; it is what a
+        // roundtrip or a later download can be checked against.
+        if (ok) {
+          try {
+            digest = { algorithm: 'sha256', hex: await hashFile(artifactPath, 'sha256') };
+          } catch {
+            digest = undefined;
+          }
+        }
+        // Round trip: unpack into a temporary directory and compare every file
+        // that went in against what came out. `bz t` proves the container is
+        // sound; only this proves the content survived.
+        if (ok && args.verify === 'roundtrip') {
+          let tempDir;
+          try {
+            // Mirror how bz stores what it was given: a relative entry keeps its
+            // path, an absolute one is stored under its base name. Deriving the
+            // names a second way is what produced false "missing" reports.
+            const before = new Map();
+            for (const source of queued) {
+              const raw = source.entry.replace(/[\\/]\*$/, '');
+              const base = (path.isAbsolute(raw) ? path.basename(raw) : raw).split(path.sep).join('/');
+              if (source.isDirectory) {
+                for (const [rel, meta] of await digestTree(source.absolute)) {
+                  // `recursive: false` archives only the top level, so a deeper
+                  // file is legitimately absent rather than missing.
+                  if (shallow && rel.includes('/')) continue;
+                  before.set(base === '' ? rel : `${base}/${rel}`, meta);
+                }
+              } else {
+                before.set(base, {
+                  size: statSync(source.absolute).size,
+                  sha256: await hashFile(source.absolute, 'sha256'),
+                });
+              }
+            }
+            tempDir = mkdtempSync(path.join(os.tmpdir(), 'bandizip-verify-'));
+            const extractArgv = ['x', '-y', '-o:' + tempDir];
+            if (password) extractArgv.push(passwordArg(password, settings.allowPassword));
+            extractArgv.push(artifactPath);
+            const extract = await run(extractArgv);
+            if (extract.exitCode !== 0 && extract.exitCode !== 1) {
+              roundtrip = {
+                ok: false,
+                checkedFiles: before.size,
+                reason: `解压失败，无法核对（bz 退出码 ${extract.exitCode}）`,
+              };
+            } else {
+              const after = await digestTree(tempDir);
+              const missing = [];
+              const differing = [];
+              for (const [name, meta] of before) {
+                const copy = after.get(name);
+                if (copy === undefined) missing.push(name);
+                else if (copy.size !== meta.size || copy.sha256 !== meta.sha256) differing.push(name);
+              }
+              roundtrip = {
+                ok: missing.length === 0 && differing.length === 0,
+                checkedFiles: before.size,
+                ...(missing.length === 0 ? {} : { missing }),
+                ...(differing.length === 0 ? {} : { differing }),
+              };
+              if (!roundtrip.ok) {
+                verifyNote += `; 往返核对不一致（缺失 ${missing.length} 个、内容不同 ${differing.length} 个）`;
+              }
+            }
+          } catch (error) {
+            roundtrip = {
+              ok: false,
+              checkedFiles: 0,
+              reason: error instanceof Error ? error.message : String(error),
+            };
+            verifyNote += `; 往返核对无法完成（${roundtrip.reason}）`;
+          } finally {
+            if (tempDir !== undefined) {
+              try {
+                rmSync(tempDir, { recursive: true, force: true });
+              } catch {
+                // A leftover temp directory must never fail the create.
+              }
+            }
           }
         }
         const verb = isAppend ? 'Appended to' : 'Created';
@@ -1576,6 +1756,9 @@ export function apply(ctx, config) {
           action, archive: archivePath, ok, exitCode: result.exitCode, summary,
           output: decoded.text, truncated: decoded.truncated, mode: effectiveMode,
           ...(size === undefined ? {} : { size }),
+          ...(verified === undefined ? {} : { verified }),
+          ...(digest === undefined ? {} : { digest }),
+          ...(roundtrip === undefined ? {} : { roundtrip }),
         };
       }
 

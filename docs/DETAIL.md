@@ -62,7 +62,7 @@ See what a real extract would collide with before running it:
 Pack by glob and verify the result:
 
 ```json
-{"action": "create", "archive": "src.zip", "files": ["."], "include": ["**/*.ts"], "verify": true}
+{"action": "create", "archive": "src.zip", "files": ["."], "include": ["**/*.ts"], "verify": "roundtrip"}
 ```
 
 Compare two releases:

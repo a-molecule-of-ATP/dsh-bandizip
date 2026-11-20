@@ -53,7 +53,7 @@
 打包时按通配筛选，并在完成后自检：
 
 ```json
-{"action": "create", "archive": "src.zip", "files": ["."], "include": ["**/*.ts"], "verify": true}
+{"action": "create", "archive": "src.zip", "files": ["."], "include": ["**/*.ts"], "verify": "roundtrip"}
 ```
 
 比较两版包的差异：

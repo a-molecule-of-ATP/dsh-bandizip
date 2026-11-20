@@ -19,7 +19,7 @@
 
 它向智能体注册 **1 个工具 `bandizip`**，通过 `action` 参数完成 **8 种操作**（`create` / `extract` / `list` / `test` 是基本操作，`preview` / `diff` / `browse` / `convert` 是派生检查与重打包）：
 
-- `create`：把文件/文件夹压缩成新压缩包（支持 zip、zipx、7z、tar、tgz、gz、xz、iso、lzh、自解压 exe；`rar` 等格式可读取但由解压/列举间接支持）。可用 `format` 指定格式、`level`（0–9，默认 5）指定级别、`include` 通配筛选要加入的路径、`mode:append` 追加到已有包、`volumeSize` 分卷（如 `"100MB"` 或 `"1440k"`，输出被拆成 `xxx.z01`、`xxx.z02`… 加最后一个 `.zip`，摘要会报告总 part 数与总字节数）、`verify` 生成后做完整性校验。
+- `create`：把文件/文件夹压缩成新压缩包（支持 zip、zipx、7z、tar、tgz、gz、xz、iso、lzh、自解压 exe；`rar` 等格式可读取但由解压/列举间接支持）。可用 `format` 指定格式、`level`（0–9，默认 5）指定级别、`include` 通配筛选要加入的路径、`mode:append` 追加到已有包、`volumeSize` 分卷（如 `"100MB"` 或 `"1440k"`，输出被拆成 `xxx.z01`、`xxx.z02`… 加最后一个 `.zip`，摘要会报告总 part 数与总字节数）。`verify` 生成后做校验：`true` 跑一次完整的 `bz t`；`"roundtrip"` 除了 `bz t`，还会把包解到临时目录、逐个文件比对大小与 SHA-256，核对打进去的每个文件都原样解出，而不只是容器没坏。create 成功即返回产物 `digest`（sha256），不必开 `verify`；校验失败不删包。
 - `extract`：把压缩包解压到指定目录（默认解到压缩包同名文件夹）。支持 `include` / `exclude` 掩码筛选条目、`flat` 扁平化、`overwrite` 覆盖策略、`encoding` 解码；**写盘之前**先过三道检查——zip-slip 路径穿越、压缩炸弹上限（设置 `maxExtractBytes`）、符号链接条目（设置 `rejectSymlinkEntries`），任何一道不过就整包拒绝；执行逻辑还支持 `dryRun` 预演（只报告 wouldCreate / wouldOverwrite / wouldSkip 与冲突，不写文件，见「已知限制」）。
 - `list`：列出压缩包内的条目，可按文字过滤（`filter`），并用 `limit` / `offset` 分页、`encoding` 指定解码。
 - `test`：校验压缩包完整性与密码。
