@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Bandizip 压缩包",
-    "description": "智能体处理压缩包时，若工具面里没有对应工具，往往会退回逐个文件解压——慢且容易丢失目录结构。这个插件把本机的 Bandizip 命令行工具（bz.exe）收进工具面，让智能体管理压缩包：create 打包文件或文件夹（支持 `verify:true` 完整性校验与 `verify:\"roundtrip\"` 解包逐文件比对；create 成功即返回产物 `digest`（sha256）），可按通配筛选或追加进已有包；extract 解压到指定目录，支持包内掩码筛选、试运行与路径穿越防护；list 列出条目并可过滤、翻页；test 校验完整性与密码；preview 不落地地统计各层目录、扩展名、体积和最大条目；diff 按条目名与大小比较两个包的新增、删除和改动；browse 按层树状浏览包内目录；convert 转换格式、级别或密码并在转后校验。打包支持 zip、zipx、7z、tar、tgz、gz、xz、iso、lzh 与自解压 exe，解压和查看也支持 rar 等格式；相对路径以会话工作目录为基准，全程不弹窗、不等待交互。压缩级别、递归、覆盖策略、模式、编码、目标目录和超时等行为都在每次调用时按参数决定，不在插件里固定。注意：密码以命令行参数传给 bz.exe，本机其他进程可见；解压默认落到压缩包旁边的同名文件夹；创建不会覆盖同名压缩包，除非开启允许覆盖并显式要求。在插件页关闭本插件后，该工具即被移除。",
+    "description": "智能体处理压缩包时，若工具面里没有对应工具，往往会退回逐个文件解压——慢且容易丢失目录结构。这个插件把本机的 Bandizip 命令行工具（bz.exe）收进工具面，注册 9 个语义化工具，每个工具只声明自己用得到的参数：list_archive 列出条目并回答「是否加密」（ZIP 读中央目录的加密位，7z/RAR 用无密码 bz t 试探，探测不出就报 unknown）与「是否分卷」（按 .z01/.z02 兄弟文件判断）；extract_archive 解压到指定目录，写盘前依次过 zip-slip、压缩炸弹上限、符号链接三道防线（symlinks 可选 reject/skip/allow），支持包内掩码、dry-run 与解压前摘要核对；create_archive 打包、追加、分卷、加密，可选 bz t 校验或解包逐文件比对的 roundtrip 校验；compress_file / decompress_file 处理单个文件的 gz、xz、zstd（gz 与 zstd 走 node:zlib，xz 交给 bz.exe，zstd 需要 Node 22.15 以上，缺失时明确报错）；check_archive 用 bz t 逐条校验数据段并可与期望摘要比对；detect_format 改为按魔数识别格式（zip、7z、rar、gz、xz、bzip2、zstd、lzh、tar、iso、cab、自解压 exe），认不出才回退到 bz 与扩展名；diff_archive 按条目名与大小比较两个包；convert_archive 换格式、级别或密码并在转后自检。打包支持 zip、zipx、7z、tar、tgz、gz、xz、iso、lzh 与自解压 exe，解压和查看也支持 rar 等格式；相对路径以会话工作目录为基准，全程不弹窗、不等待交互。压缩级别、覆盖策略、模式、编码、目标目录和超时等行为都在每次调用时按参数决定，不在插件里固定。注意：密码以命令行参数传给 bz.exe，本机其他进程可见；extract_archive 的目标目录与覆盖策略为必填参数；创建不会覆盖同名压缩包，除非开启允许覆盖并显式要求。在插件页关闭本插件后，这些工具即被移除。",
     "detail": "docs/DETAIL.zh.md"
   }
 }

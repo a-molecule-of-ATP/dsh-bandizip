@@ -1,9 +1,9 @@
 {
   "name": "@local/bandizip",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "DeepSeek Harness plugin that drives the local Bandizip console tool (bz.exe) to create, extract, list, test, preview, diff, browse and convert archives.",
+  "description": "DeepSeek Harness plugin that drives the local Bandizip console tool (bz.exe) through nine semantic tools: list, extract, create, compress, decompress, check, detect, diff and convert.",
   "keywords": [
     "deepseek-harness",
     "dsh",

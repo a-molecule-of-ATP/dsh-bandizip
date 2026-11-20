@@ -64,18 +64,15 @@ if (existsSync(docs)) {
   pass('doc images resolve');
 }
 
-// 5. every action the tool dispatches must be documented somewhere
-//    A new action that nobody documents is invisible to whoever reads the README,
+// 5. every tool the bundle registers must be documented somewhere
+//    A new tool that nobody documents is invisible to whoever reads the README,
 //    which is exactly how an undocumented capability ships unnoticed.
-const actionsMatch = /const ACTIONS = \[([^\]]+)\]/.exec(source);
-if (actionsMatch === null) {
-  fail('cannot find the ACTIONS list in index.js');
-} else {
-  const actions = [...actionsMatch[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
-  const missingActions = actions.filter((action) => !readme.includes(`\`${action}\``));
-  if (missingActions.length > 0) fail(`actions missing from README: ${missingActions.join(', ')}`);
-  else pass(`${actions.length} actions documented`);
-}
+//
+//    The list is read from the module export rather than scraped out of the source, so
+//    this check cannot drift from what `apply` actually registers.
+const missingTools = mod.TOOL_NAMES.filter((tool) => !readme.includes(tool));
+if (missingTools.length > 0) fail(`tools missing from README: ${missingTools.join(', ')}`);
+else pass(`${mod.TOOL_NAMES.length} tools documented`);
 
 console.log(problems === 0 ? '\nSELF-CHECK OK' : `\n${problems} PROBLEM(S)`);
 process.exitCode = problems === 0 ? 0 : 1;
