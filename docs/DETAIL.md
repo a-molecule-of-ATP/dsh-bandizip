@@ -144,46 +144,26 @@ value when the task needs one:
 
 ## How this differs from comparable projects
 
-These are observations from one round of sampling across archive-oriented MCP
-servers and plugins. **Wherever something was "not found in our sample", it is
-written that way** — it does not mean the wider ecosystem lacks it.
+Archive tooling splits into two camps: built for agents, and built for people.
 
-- **One tool with eight actions, not one tool per action.** The archive projects we
-  sampled mostly cover only create / list / extract, and tend to register a separate
-  tool per action (some reach a dozen or more). Here everything is dispatched by one
-  `bandizip` tool through an `action` argument: one extra line in the tool list, and
-  one parameter schema to maintain.
-- **Settings hold only permissions, environment facts and hard ceilings; behaviour
-  details are passed per call.** None of the nine settings is a behaviour preference
-  such as "default compression level" or "default recursion" — level, recursive,
-  overwrite, flat, mode, encoding and destination are supplied on every call. The
-  settings answer three questions only: whether the capability is allowed
-  (`enabled`, `allowPassword`, `allowArchiveOverwrite`), which executable runs it
-  (`bzPath`), and what the hard limits are (`timeoutSeconds`, `maxOutputChars`,
-  `maxExtractBytes`, `rejectSymlinkEntries`, `restrictToWorkspace`). Within our
-  sample, we did not find a second project that states this as an explicit design
-  principle.
-- **`test` runs the real `bz t`, and extract has three pre-write guards.** `bz l`
-  reads the central directory alone and reports a damaged data section as fine, so
-  `test` verifies entries with `bz t` instead. `extract` runs zip-slip, the
-  compressed-bomb ceiling and the symlink check before writing and rejects the whole
-  archive on any failure. Within our sample, the only project that explicitly offers
-  "verify without extracting" is `zipnative-mcp`; we did not find a second one that
-  has all three pre-extract guards.
-- **`diff` and `convert` exist here.** Within our sample, no project explicitly
-  offers entry-by-entry comparison of two archives (`diff`) or repacking into another
-  format, level or password (`convert`). Both are ordinary actions here, and both
-  state their own caveat: `diff` says outright that it compares name and size only,
-  and `convert` verifies its output with `bz t` and deletes the source only when
-  `deleteSource` is set and the conversion succeeded.
+The DSH ecosystem already has an agent-facing archive plugin — `yuehancn/dsh-tool-archive`: four tools (`archive_pack`, `archive_unpack`, `archive_status`, `archive_verify`), a tar format it reads and writes itself, no external dependency, deterministic packing, a per-member refusal to write outside the destination, and SHA-256 verification of what came out. On the MCP side there is `zipnative-mcp` (a dozen typed tools, traversal/symlink/bomb guards on by default) and `zv-louis/mcp7zop` (a wrapper around a local 7-Zip CLI).
 
-The closest project in form is `zv-louis/mcp7zop`, which likewise wraps a local 7-Zip
-command line. One more reference point: the official MCP `filesystem` server already
-has realpath resolution and allowed directories, yet public records still show path
-traversal and TOCTOU issues against it — sandboxed path access is a surface that keeps
-producing bugs rather than something one setting permanently fixes.
+What those share is an **engine of their own** — either implementing the format or shipping a compression stack. This plugin takes the other road: **no new engine; it connects the Bandizip already installed on the machine to the agent's tool surface.**
 
-> Sampling caveat: every "not found" above is scoped to this one round (mostly
-> relayed by a research agent; project pages were spot-checked for existence, and the
-> CVE / GHSA identifiers were not individually verified). Comparisons like this age
-> quickly — treat them as an observation at the time of writing.
+| | `dsh-tool-archive` | This plugin |
+|---|---|---|
+| Engine | tar, implemented in the plugin | the local `bz.exe` |
+| Formats | tar | zip / zipx / 7z / iso / exe / lzh / tar family |
+| Determinism, checksum | a strength (deterministic tar + SHA-256) | none (integrity via `bz t`) |
+| Runtime | zero dependency, cross-platform | Windows + Bandizip installed |
+| Tool shape | 4 tools | 1 tool with 8 actions |
+
+The remaining points are differences against the MCP group:
+
+1. **One tool with eight actions, not one tool per action.** Most sampled projects stop at create / list / extract and tend to register a separate tool for each. Here a single `bandizip` dispatches on `action`, so the tool list grows by one line.
+2. **Settings keep only permissions, environment facts and ceilings.** None of the nine is a behaviour preference such as a default compression level — level, recursive, overwrite, flat, mode, encoding and destination are all passed per call. What remains answers three questions: what may be used, what it points at, and the hard ceilings.
+3. **Three guards before anything is written.** zip-slip, a declared-size ceiling and symlink entries; failing any one refuses the whole archive. **These are not unique to this plugin** — `zipnative-mcp` and `dsh-tool-archive` have guards of their own — the difference is that here they sit in front of one machine's multi-format engine.
+4. **`diff` and `convert` were not found among comparable projects in the sample.** Both are ordinary actions here: `diff` states plainly that it compares by name and size only, and `convert` verifies the result with `bz t` and deletes the source only after success.
+
+> Sampling note: "not found" means not found in this round of sampling (project pages were checked for existence; CVE / GHSA identifiers were not verified one by one). Comparisons age; read this as an observation at the time of writing.
+

@@ -81,19 +81,28 @@
 
 ## 与同类的差异
 
-以下是我们对压缩包类 MCP / 插件项目做过一轮抽样调研后的结论。**凡属「抽样范围内没找到」的，就按抽样范围写**，不代表整个生态没有。
+压缩包工具可以分成两拨：给智能体用的，和给人用的。
 
-1. **一个工具 + 8 个 action，而不是每个动作一个工具。** 抽样到的压缩包类项目大多只做 create / list / extract 这「三件套」，并且倾向每动作注册一个独立 tool（有的项目注册到十几个）。这里收成一个 `bandizip` 工具，用 `action` 分派，工具清单只多一行，参数 schema 也只维护一份。
+DSH 生态里已经有一个面向智能体的压缩包插件——`yuehancn/dsh-tool-archive`：注册 `archive_pack` / `archive_unpack` / `archive_status` / `archive_verify` 四个工具，tar 格式自己读自己写、零外部依赖，确定性打包，解包时逐个成员拒绝写到目标目录之外，并用 SHA-256 核对解出来的东西。MCP 侧另有 `zipnative-mcp`（十几个 typed tool，默认开启 traversal / symlink / bomb 防护）与 `zv-louis/mcp7zop`（包一层本地 7-Zip 命令行）。
 
-2. **设置只保留限权、环境事实与上限，行为细节一律逐次传参。** 9 项设置里没有一项是「默认压缩级别」「默认递归」这类行为偏好——level、recursive、overwrite、flat、mode、encoding、destination 全部由每次调用显式给出。剩下的设置只回答三个问题：能不能用（`enabled`、`allowPassword`、`allowArchiveOverwrite`）、用到什么（`bzPath`）、以及硬上限（`timeoutSeconds`、`maxOutputChars`、`maxExtractBytes`、`rejectSymlinkEntries`、`restrictToWorkspace`）。在我们抽样范围内，没有找到第二家把这条写成显式设计原则的项目。
+这些项目的共同点是**自带引擎**：要么自己实现格式，要么随包分发一套压缩能力。本插件走的是另一条路——**不新增引擎，把本机已经装好的 Bandizip 接进智能体的工具面**。
 
-3. **`test` 用的是真正的 `bz t`，解压前另有三道防线。** `bz l` 只读中央目录，损坏的数据段它照样报告正常，所以 `test` 单独走 `bz t` 逐条校验数据。`extract` 在写盘之前依次过 zip-slip（`..`、绝对路径、盘符）、压缩炸弹上限、符号链接条目三道检查，任一不过整包拒绝并返回 `rejected:true`。抽样中明确提供「不解压即校验」的项目只有 `zipnative-mcp` 一家；把这三道解压前检查做齐的，在抽样范围内没有找到第二家。
+| | `dsh-tool-archive` | 本插件 |
+|---|---|---|
+| 引擎 | 自实现 tar | 复用本机 `bz.exe` |
+| 格式 | tar | zip / zipx / 7z / iso / exe / lzh / tar 系 |
+| 确定性、校验和 | 强项（确定性 tar + SHA-256） | 无（用 `bz t` 校验完整性） |
+| 运行前提 | 零依赖、跨平台 | Windows + 已装 Bandizip |
+| 工具形态 | 4 个工具 | 1 个工具 / 8 个 action |
 
-4. **提供 `diff` 和 `convert` 这类能力。** 抽样范围内没有一家明确提供按条目比较两个包（`diff`）或把包重打包成另一种格式 / 级别 / 密码（`convert`）。这两项在这里都是普通 action，`diff` 会明确写出「只按名字 + 大小比较」这个口径限制，`convert` 转完自动用 `bz t` 校验、`deleteSource` 只在成功后才删源包。
+其余几条是相对 MCP 那批的差异：
 
-形态上最接近本项目的是 `zv-louis/mcp7zop`，同样是把本地 7-Zip 命令行包一层。另外一个对照点：官方 MCP 的 `filesystem` server 已经有 realpath 解析和 allowed-directories，但公开记录里仍出现过多起路径穿越与 TOCTOU 问题——这说明「沙箱化路径访问」本身是个反复出问题的面，而不是一次配好就永久有效。
+1. **一个工具 + 8 个 action，而不是每个动作一个工具。** 抽样到的压缩包项目大多只做 create / list / extract「三件套」，并且倾向每动作注册一个独立 tool。这里收成一个 `bandizip`，用 `action` 分派，工具清单只多一行。
+2. **设置只保留限权、环境事实与上限，行为细节逐次传参。** 9 项设置里没有一项是「默认压缩级别」这类行为偏好——level、recursive、overwrite、flat、mode、encoding、destination 全部由每次调用给出。剩下的设置只回答三件事：能不能用、用到什么、硬上限。
+3. **解压前有三道防线。** zip-slip、压缩炸弹上限、符号链接条目，任一不过整包拒绝。**这几项不是本插件独有**（`zipnative-mcp` 与 `dsh-tool-archive` 都有各自的守卫），差别在于这里的守卫组合在一台机器的多格式引擎上。
+4. **`diff` 与 `convert` 在抽样范围内没有见到同类实现。** 这两项在这里都是普通 action：`diff` 明确写出「只按名字 + 大小比较」的口径，`convert` 转完自动用 `bz t` 校验，`deleteSource` 只在成功后才删源包。
 
-> 调研口径说明：以上「没有找到」均指本轮抽样范围（代理转述为主，项目页存在性已抽查，CVE / GHSA 编号未逐个核对）。这类横向比较容易过时，请当作写作时点的观察，而不是长期结论。
+> 调研口径：以上「没有见到」均指本轮抽样范围（项目页存在性已抽查，CVE / GHSA 编号未逐个核对）。横向对比会过时，请当作写作时点的观察。
 
 ## 安全说明（哪些操作有破坏性）
 
